@@ -63,7 +63,12 @@ class BrowserService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_MEDIA_STATE) updateFromIntent(intent)
+        when (intent?.action) {
+            ACTION_MEDIA_STATE -> updateFromIntent(intent)
+            ACTION_NEXT -> BrowserBridge.sendMediaCommand("next")
+            ACTION_PREVIOUS -> BrowserBridge.sendMediaCommand("prev")
+            ACTION_TOGGLE -> BrowserBridge.sendMediaCommand("play_pause")
+        }
 
         if (!foregroundStarted) {
             startForeground(notificationId, buildNotification())
