@@ -1,0 +1,3 @@
+## 2024-10-31 - SharedPreferences in High-Frequency UI Events
+**Learning:** Querying `SharedPreferences` (e.g., `getBoolean`, `getString`) within high-frequency UI events like `onScrollChanged` and `onFling` in Android can introduce lock contention and micro-stutters, even though the values are in-memory caches. This is especially true for gesture handlers that fire multiple times per second.
+**Action:** Cache `SharedPreferences` values in instance properties for high-frequency access points, initializing them in `onCreate` and updating them only when the settings change, to avoid main-thread jank.

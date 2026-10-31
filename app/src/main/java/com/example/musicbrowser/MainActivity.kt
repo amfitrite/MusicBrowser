@@ -43,6 +43,12 @@ class MainActivity : AppCompatActivity() {
     private var currentTitle: String = "Unknown Title"
     private var currentUrl: String = ""
 
+    // Cached SharedPreferences values for performance
+    private var bgPlayEnabled: Boolean = true
+    private var autoHideToolbar: Boolean = true
+    private var toolbarSensitivity: String = "FAST"
+    private var toolbarPosition: String = "BOTTOM"
+
     // ActivityResultLauncher for picking .xpi files
     private val xpiFilePickerLauncher = registerForActivityResult(
         ActivityResultContracts.GetContent()
@@ -83,7 +89,10 @@ class MainActivity : AppCompatActivity() {
         geckoRuntime = org.mozilla.geckoview.GeckoRuntime.create(applicationContext, runtimeSettings)
         
         val initPrefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val bgPlayEnabled = initPrefs.getBoolean("BACKGROUND_PLAY_ENABLED", true)
+        bgPlayEnabled = initPrefs.getBoolean("BACKGROUND_PLAY_ENABLED", true)
+        autoHideToolbar = initPrefs.getBoolean("AUTO_HIDE_TOOLBAR", true)
+        toolbarSensitivity = initPrefs.getString("TOOLBAR_SENSITIVITY", "FAST") ?: "FAST"
+        toolbarPosition = initPrefs.getString("TOOLBAR_POSITION", "BOTTOM") ?: "BOTTOM"
         val settings = org.mozilla.geckoview.GeckoSessionSettings.Builder()
             .suspendMediaWhenInactive(!bgPlayEnabled)
             .build()
@@ -198,10 +207,7 @@ class MainActivity : AppCompatActivity() {
 
         geckoSession.scrollDelegate = object : GeckoSession.ScrollDelegate {
             override fun onScrollChanged(session: GeckoSession, scrollX: Int, scrollY: Int) {
-                val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                val autoHideEnabled = prefs.getBoolean("AUTO_HIDE_TOOLBAR", true)
-
-                if (!autoHideEnabled) {
+                if (!autoHideToolbar) {
                     if (isTopBarHidden) {
                         showTopBar()
                         isTopBarHidden = false
@@ -209,9 +215,8 @@ class MainActivity : AppCompatActivity() {
                     return
                 }
 
-                val sensitivity = prefs.getString("TOOLBAR_SENSITIVITY", "FAST")
-                val hideThreshold = if (sensitivity == "SLOW") 30 else 2
-                val showThreshold = if (sensitivity == "SLOW") -20 else -2
+                val hideThreshold = if (toolbarSensitivity == "SLOW") 30 else 2
+                val showThreshold = if (toolbarSensitivity == "SLOW") -20 else -2
 
                 val dy = scrollY - lastScrollY
                 if (dy > hideThreshold && scrollY > 10 && !isTopBarHidden) {
@@ -225,8 +230,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         
-        val isBgEnabled = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getBoolean("BACKGROUND_PLAY_ENABLED", true)
-        if (isBgEnabled) {
+        if (bgPlayEnabled) {
             geckoSession.setActive(true)
         }
         
@@ -413,10 +417,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun applyToolbarPosition() {
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val position = prefs.getString("TOOLBAR_POSITION", "BOTTOM")
         val layoutParams = menuContainer.layoutParams as androidx.constraintlayout.widget.ConstraintLayout.LayoutParams
-        if (position == "TOP") {
+        if (toolbarPosition == "TOP") {
             layoutParams.topToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
             layoutParams.bottomToBottom = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET
             layoutParams.topMargin = 12.dpToPx()
@@ -435,9 +437,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun hideTopBar() {
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val position = prefs.getString("TOOLBAR_POSITION", "BOTTOM")
-        val targetY = if (position == "TOP") -menuContainer.height.toFloat() - 200f else menuContainer.height.toFloat() + 200f
+        val targetY = if (toolbarPosition == "TOP") -menuContainer.height.toFloat() - 200f else menuContainer.height.toFloat() + 200f
 
         menuContainer.animate()
             .translationY(targetY)
@@ -476,10 +476,8 @@ class MainActivity : AppCompatActivity() {
                             return true
                         }
                     } else {
-                        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                        val sensitivity = prefs.getString("TOOLBAR_SENSITIVITY", "FAST")
-                        val minDiffY = if (sensitivity == "SLOW") 100 else 25
-                        val minVelocity = if (sensitivity == "SLOW") 150 else 30
+                        val minDiffY = if (toolbarSensitivity == "SLOW") 100 else 25
+                        val minVelocity = if (toolbarSensitivity == "SLOW") 150 else 30
 
                         if (diffY < -minDiffY && Math.abs(velocityY) > minVelocity) {
                             hideTopBar()
@@ -669,6 +667,11 @@ class MainActivity : AppCompatActivity() {
                     .putString("TOOLBAR_SENSITIVITY", selectedSens)
                     .apply()
                     
+                bgPlayEnabled = bgEnabled
+                autoHideToolbar = autoHideEnabled
+                toolbarSensitivity = selectedSens
+                toolbarPosition = selectedPos ?: "BOTTOM"
+
                 geckoSession.settings.setSuspendMediaWhenInactive(!bgEnabled)
                 geckoSession.setActive(bgEnabled)
                 
@@ -1105,16 +1108,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onPause() {
-        val isBgEnabled = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getBoolean("BACKGROUND_PLAY_ENABLED", true)
-        if (isBgEnabled) {
+        if (bgPlayEnabled) {
             geckoSession.setActive(true)
         }
         super.onPause()
     }
 
     override fun onStop() {
-        val isBgEnabled = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getBoolean("BACKGROUND_PLAY_ENABLED", true)
-        if (isBgEnabled) {
+        if (bgPlayEnabled) {
             geckoSession.setActive(true)
         }
         super.onStop()
