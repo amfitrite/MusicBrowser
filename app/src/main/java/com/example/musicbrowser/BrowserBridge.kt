@@ -2,6 +2,8 @@ package com.example.musicbrowser
 
 import android.content.Context
 import android.content.Intent
+import android.media.AudioManager
+import android.view.KeyEvent
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -12,6 +14,7 @@ import org.mozilla.geckoview.WebExtension
 /** One native WebExtension port and one transport-command route for all supported sites. */
 object BrowserBridge {
     private const val TAG = "BrowserBridge"
+    @Volatile private var appContext: Context? = null
     @Volatile private var nativePort: WebExtension.Port? = null
     @Volatile var currentTrack: MusicTrack? = null
         private set
@@ -21,6 +24,7 @@ object BrowserBridge {
 
     fun install(context: Context, runtime: GeckoRuntime) {
         val app = context.applicationContext
+        appContext = app
         synchronized(this) {
             if (installStarted) return
             installStarted = true
@@ -45,7 +49,7 @@ object BrowserBridge {
                                 val json = message as? JSONObject ?: return
                                 when (json.optString("action")) {
                                     "request_config" -> sendConfig(app)
-                                    "trigger_media_next" -> sendMediaCommand("next")
+                                    "trigger_media_next" -> dispatchAndroidMediaNext()
                                 }
                                 if (json.optString("type") == "MEDIA_STATE") {
                                     receiveMediaState(app, json)
@@ -82,6 +86,22 @@ object BrowserBridge {
             } catch (error: Exception) {
                 Log.e(TAG, "Unable to post message to Gecko extension", error)
             }
+        }
+    }
+
+    private fun dispatchAndroidMediaNext() {
+        val context = appContext
+        if (context == null) {
+            sendMediaCommand("next")
+            return
+        }
+        try {
+            val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_NEXT))
+            audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_NEXT))
+        } catch (error: Exception) {
+            Log.e(TAG, "Unable to dispatch Android media-next key", error)
+            sendMediaCommand("next")
         }
     }
 

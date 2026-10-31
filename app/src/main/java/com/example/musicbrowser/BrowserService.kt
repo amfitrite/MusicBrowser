@@ -122,9 +122,8 @@ class BrowserService : Service() {
         val lock = wakeLock ?: return
         if (playing) {
             try {
-                if (lock.isHeld) lock.release()
-                // Media-state heartbeats renew a bounded wake lock during active playback only.
-                lock.acquire(10 * 60 * 1000L)
+                // Acquire only when needed; the bounded lock is reacquired after it expires.
+                if (!lock.isHeld) lock.acquire(10 * 60 * 1000L)
             } catch (_: Exception) {
             }
         } else if (lock.isHeld) {
