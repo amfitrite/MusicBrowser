@@ -50,23 +50,6 @@ class MainActivity : AppCompatActivity() {
         uri?.let { installXpiFromUri(it) }
     }
 
-    private val mediaCtrlReceiver = object : android.content.BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            val cmd = intent?.getStringExtra("cmd")
-            if (cmd == "play_pause" || cmd == "next" || cmd == "prev") {
-                val config = org.json.JSONObject()
-                config.put("type", "MEDIA_CMD")
-                config.put("cmd", cmd)
-                
-                try {
-                    skipOutroPort?.postMessage(config)
-                } catch (e: Exception) {
-                    android.util.Log.e("MediaCtrl", "Cannot send message to extension", e)
-                }
-            }
-        }
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -76,18 +59,27 @@ class MainActivity : AppCompatActivity() {
         menuContainer = findViewById<MaterialCardView>(R.id.menuContainer)
         val settingsButton = findViewById<ImageButton>(R.id.settingsButton)
 
-        // Initialize GeckoView Runtime once with ALLOW_ALL for insecure/mixed content media
-        val runtimeSettings = org.mozilla.geckoview.GeckoRuntimeSettings.Builder()
-            .allowInsecureConnections(org.mozilla.geckoview.GeckoRuntimeSettings.ALLOW_ALL)
-            .build()
-        geckoRuntime = org.mozilla.geckoview.GeckoRuntime.create(applicationContext, runtimeSettings)
-        
+        // Keep the browser session process-scoped so media playback can survive
+        // Activity recreation and moving the app to the background.
         val initPrefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val bgPlayEnabled = initPrefs.getBoolean("BACKGROUND_PLAY_ENABLED", true)
-        val settings = org.mozilla.geckoview.GeckoSessionSettings.Builder()
+
+        if (BrowserSessionStore.runtime == null) {
+            val runtimeSettings = org.mozilla.geckoview.GeckoRuntimeSettings.Builder()
+                .allowInsecureConnections(org.mozilla.geckoview.GeckoRuntimeSettings.ALLOW_ALL)
+                .build()
+            BrowserSessionStore.runtime = org.mozilla.geckoview.GeckoRuntime.create(applicationContext, runtimeSettings)
+        }
+        geckoRuntime = BrowserSessionStore.runtime!!
+
+        val sessionSettings = org.mozilla.geckoview.GeckoSessionSettings.Builder()
             .suspendMediaWhenInactive(!bgPlayEnabled)
             .build()
-        geckoSession = GeckoSession(settings)
+        if (BrowserSessionStore.session == null) {
+            BrowserSessionStore.session = GeckoSession(sessionSettings)
+        }
+        geckoSession = BrowserSessionStore.session!!
+        geckoSession.settings.setSuspendMediaWhenInactive(!bgPlayEnabled)
 
         // Automatically grant permissions (like DRM/Widevine, EME, Autoplay, Media)
         geckoSession.permissionDelegate = object : GeckoSession.PermissionDelegate {
@@ -286,7 +278,10 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Attach Session to View
-        geckoSession.open(geckoRuntime)
+        if (!BrowserSessionStore.sessionOpened) {
+            geckoSession.open(geckoRuntime)
+            BrowserSessionStore.sessionOpened = true
+        }
         geckoView.setSession(geckoSession)
 
         // Request notification permission for Android 13+
@@ -298,17 +293,8 @@ class MainActivity : AppCompatActivity() {
         val serviceIntent = android.content.Intent(this, BrowserService::class.java)
         androidx.core.content.ContextCompat.startForegroundService(this, serviceIntent)
         
-        // Register receiver for Media Control from Notification
-        androidx.core.content.ContextCompat.registerReceiver(
-            this,
-            mediaCtrlReceiver,
-            android.content.IntentFilter("com.example.musicbrowser.MEDIA_CTRL"),
-            androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED
-        )
-
-        // Setup Built-in WebExtensions
-        installBackgroundPlayExtension()
-        installSkipOutroExtension()
+        // One shared WebExtension/native bridge handles every supported music provider.
+        BrowserBridge.install(applicationContext, geckoRuntime)
 
         // Load YouTube by default
         geckoSession.loadUri("https://m.youtube.com")
@@ -376,6 +362,10 @@ class MainActivity : AppCompatActivity() {
                     }
                     R.id.menu_my_playlist -> {
                         showPlaylistDialog()
+                        true
+                    }
+                    R.id.menu_my_history -> {
+                        showHistoryDialog()
                         true
                     }
                     R.id.menu_add_ext -> {
@@ -554,10 +544,10 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, 32, 0, 8)
         }
         val outroSpinner = android.widget.Spinner(this).apply {
-            val times = arrayOf("Off", "5 Seconds", "10 Seconds", "15 Seconds")
+            val times = arrayOf("Off", "5 Seconds", "10 Seconds", "15 Seconds", "20 Seconds", "25 Seconds", "30 Seconds")
             adapter = android.widget.ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, times)
             val currentTime = prefs.getInt("SKIP_OUTRO_TIME", 0)
-            setSelection(arrayOf(0, 5, 10, 15).indexOf(currentTime).takeIf { it >= 0 } ?: 0)
+            setSelection(arrayOf(0, 5, 10, 15, 20, 25, 30).indexOf(currentTime).takeIf { it >= 0 } ?: 0)
         }
 
         // --- Skip Outro Method Selection ---
@@ -650,7 +640,7 @@ class MainActivity : AppCompatActivity() {
             .setView(settingsLayout)
             .setPositiveButton("Save") { dialog, _ ->
                 val engineValues = arrayOf("google", "duckduckgo", "bing")
-                val timeValues = arrayOf(0, 5, 10, 15)
+                val timeValues = arrayOf(0, 5, 10, 15, 20, 25, 30)
                 val methodValues = arrayOf("A", "B")
                 val posValues = arrayOf("BOTTOM", "TOP")
                 val sensitivityValues = arrayOf("FAST", "SLOW")
@@ -686,116 +676,95 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    private var skipOutroPort: WebExtension.Port? = null
-
-    private fun installBackgroundPlayExtension() {
-        geckoRuntime.webExtensionController.installBuiltIn("resource://android/assets/extensions/background_play/")
-    }
-
-    private fun installSkipOutroExtension() {
-        geckoRuntime.webExtensionController
-            .installBuiltIn("resource://android/assets/extensions/skip_outro/")
-            .accept({ ext ->
-                if (ext != null) {
-                    ext.setMessageDelegate(object : WebExtension.MessageDelegate {
-                        override fun onConnect(port: WebExtension.Port) {
-                            skipOutroPort = port
-                            
-                            // When connection is established, send current config
-                            sendSkipOutroConfigToExtension()
-                            
-                            port.setDelegate(object : WebExtension.PortDelegate {
-                                override fun onPortMessage(message: Any, port: WebExtension.Port) {
-                                    if (message is org.json.JSONObject) {
-                                        val action = message.optString("action")
-                                        if (action == "trigger_media_next") {
-                                            val audioManager = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
-                                            audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_NEXT))
-                                            audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_NEXT))
-                                        } else if (action == "request_config") {
-                                            sendSkipOutroConfigToExtension()
-                                        }
-                                    }
-                                }
-                            })
-                        }
-                    }, "musicbrowser.internal")
-                }
-            }, { e ->
-                android.util.Log.e("SkipOutroExt", "Failed to install built-in extension", e)
-            })
-    }
-
     private fun sendSkipOutroConfigToExtension() {
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val config = org.json.JSONObject()
-        config.put("type", "SET_CONFIG")
-        config.put("skipTime", prefs.getInt("SKIP_OUTRO_TIME", 0))
-        config.put("skipMethod", prefs.getString("SKIP_OUTRO_METHOD", "B"))
-        
-        skipOutroPort?.postMessage(config)
+        BrowserBridge.sendConfig(applicationContext)
     }
 
-    private fun showPlaylistDialog() {
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val playlistJson = prefs.getString(PREF_PLAYLIST, "[]")
-        val array = org.json.JSONArray(playlistJson)
-        
-        val layout = android.widget.LinearLayout(this).apply {
+    private fun showPlaylistDialog() = showTrackCollection(showHistory = false)
+
+    private fun showHistoryDialog() = showTrackCollection(showHistory = true)
+
+    private fun showTrackCollection(showHistory: Boolean) {
+        val tracks = MusicLibrary.getTracks(this, showHistory)
+        val content = android.widget.LinearLayout(this).apply {
             orientation = android.widget.LinearLayout.VERTICAL
-            setPadding(32, 32, 32, 32)
+            setPadding(32, 24, 32, 24)
         }
-        
-        val scrollView = android.widget.ScrollView(this)
-        scrollView.addView(layout)
-        
+        val scroll = android.widget.ScrollView(this)
+        scroll.addView(content)
         val dialog = AlertDialog.Builder(this)
-            .setTitle("My Playlist")
-            .setView(scrollView)
+            .setTitle(if (showHistory) "Recently Played" else "Unified Playlist")
+            .setView(scroll)
             .setPositiveButton("Close", null)
-            .show()
-            
-        for (i in 0 until array.length()) {
-            val item = array.getJSONObject(i)
-            val title = item.optString("title", "Unknown")
-            val url = item.optString("url", "")
-            
-            val itemLayout = android.widget.LinearLayout(this).apply {
+            .create()
+
+        if (!showHistory) {
+            content.addView(android.widget.Button(this).apply {
+                text = "＋ Save currently playing track"
+                isAllCaps = false
+                setOnClickListener {
+                    val track = BrowserBridge.currentTrack
+                    if (track == null || track.title.isBlank() || track.url.isBlank()) {
+                        Toast.makeText(this@MainActivity, "No track information is available yet", Toast.LENGTH_SHORT).show()
+                    } else {
+                        MusicLibrary.addToPlaylist(this@MainActivity, track)
+                        Toast.makeText(this@MainActivity, "Saved to unified playlist", Toast.LENGTH_SHORT).show()
+                        dialog.dismiss()
+                        showPlaylistDialog()
+                    }
+                }
+            })
+        }
+
+        if (tracks.isEmpty()) {
+            content.addView(android.widget.TextView(this).apply {
+                text = if (showHistory) "No listening history yet." else "Your playlist is empty."
+                textSize = 14f
+                setPadding(0, 24, 0, 24)
+            })
+        }
+
+        tracks.forEachIndexed { index, track ->
+            val row = android.widget.LinearLayout(this).apply {
                 orientation = android.widget.LinearLayout.HORIZONTAL
-                setPadding(0, 16, 0, 16)
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setPadding(0, 12, 0, 12)
             }
-            
-            val titleView = android.widget.TextView(this).apply {
-                text = title
-                textSize = 16f
+            val labels = android.widget.LinearLayout(this).apply {
+                orientation = android.widget.LinearLayout.VERTICAL
                 layoutParams = android.widget.LinearLayout.LayoutParams(0, android.view.ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                 setOnClickListener {
-                    geckoSession.loadUri(url)
-                    dialog.dismiss()
+                    if (track.url.isNotBlank()) {
+                        geckoSession.loadUri(track.url)
+                        dialog.dismiss()
+                    }
                 }
             }
-            
-            val deleteBtn = android.widget.ImageButton(this).apply {
+            labels.addView(android.widget.TextView(this).apply {
+                text = track.title
+                textSize = 15f
+                maxLines = 2
+            })
+            labels.addView(android.widget.TextView(this).apply {
+                text = listOf(track.artist, track.provider).filter { it.isNotBlank() }.joinToString(" · ")
+                textSize = 12f
+                maxLines = 1
+            })
+            val remove = android.widget.ImageButton(this).apply {
                 setImageResource(android.R.drawable.ic_menu_delete)
+                contentDescription = "Remove track"
                 setBackgroundResource(0)
                 setOnClickListener {
-                    array.remove(i)
-                    prefs.edit().putString(PREF_PLAYLIST, array.toString()).apply()
+                    MusicLibrary.removeTrack(this@MainActivity, showHistory, index)
                     dialog.dismiss()
-                    showPlaylistDialog()
+                    showTrackCollection(showHistory)
                 }
             }
-            
-            itemLayout.addView(titleView)
-            itemLayout.addView(deleteBtn)
-            layout.addView(itemLayout)
+            row.addView(labels)
+            row.addView(remove)
+            content.addView(row)
         }
-        
-        if (array.length() == 0) {
-            layout.addView(android.widget.TextView(this).apply {
-                text = "Your playlist is empty."
-            })
-        }
+        dialog.show()
     }
 
     private fun showMyExtensionsDialog() {
@@ -1126,8 +1095,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        unregisterReceiver(mediaCtrlReceiver)
-        geckoSession.close()
+        // BrowserSessionStore owns the session so playback can continue in the background.
         super.onDestroy()
     }
 }

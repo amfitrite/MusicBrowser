@@ -1,40 +1,67 @@
-let port = null;
+let nativePort = null;
+let selectedTabId = null;
+let playingTabId = null;
 
-function connectToNative() {
+function connectNative() {
+    if (nativePort) return;
     try {
-        port = browser.runtime.connectNative("musicbrowser.internal");
-
-        port.onMessage.addListener((response) => {
-            // Broadcast the config/cmd to all content scripts
-            if (response.type === 'SET_CONFIG' || response.type === 'MEDIA_CMD') {
+        nativePort = browser.runtime.connectNative("musicbrowser.internal");
+        nativePort.onMessage.addListener(message => {
+            if (!message || !message.type) return;
+            if (message.type === "SET_CONFIG") {
                 browser.tabs.query({}).then(tabs => {
-                    for (let tab of tabs) {
-                        browser.tabs.sendMessage(tab.id, response).catch(e => {});
-                    }
+                    tabs.forEach(tab => {
+                        if (tab.id !== undefined) browser.tabs.sendMessage(tab.id, message).catch(() => {});
+                    });
                 });
+            } else if (message.type === "MEDIA_CMD") {
+                const target = playingTabId !== null ? playingTabId : selectedTabId;
+                if (target !== null && target !== undefined) {
+                    browser.tabs.sendMessage(target, message).catch(() => {});
+                }
             }
         });
-
-        port.onDisconnect.addListener(() => {
-            port = null;
-        });
-    } catch(e) {
-        console.error("Failed to connect to native app: ", e);
-        port = null;
+        nativePort.onDisconnect.addListener(() => { nativePort = null; });
+    } catch (error) {
+        nativePort = null;
+        console.error("Unable to connect media bridge", error);
     }
 }
 
-connectToNative();
+function sendNative(message) {
+    connectNative();
+    if (!nativePort) return;
+    try { nativePort.postMessage(message); }
+    catch (error) { nativePort = null; console.error("Native media bridge disconnected", error); }
+}
 
-// Listen for messages from content scripts
-browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (!port) {
-        connectToNative();
+browser.tabs.onActivated.addListener(info => { selectedTabId = info.tabId; });
+browser.tabs.onRemoved.addListener(tabId => {
+    if (selectedTabId === tabId) selectedTabId = null;
+    if (playingTabId === tabId) playingTabId = null;
+});
+browser.tabs.query({ active: true, currentWindow: true }).then(tabs => {
+    if (tabs[0]) selectedTabId = tabs[0].id;
+});
+
+browser.runtime.onMessage.addListener((message, sender) => {
+    if (!message) return;
+    if (message.action === "request_config" || message.action === "trigger_media_next") {
+        sendNative(message);
+        return;
     }
-    if (message.action === 'trigger_media_next' && port) {
-        // Forward the trigger to Android native app
-        port.postMessage(message);
-    } else if (message.action === 'request_config' && port) {
-        port.postMessage(message);
+    if (message.type === "MEDIA_STATE" && sender && sender.tab && sender.tab.id !== undefined) {
+        const tabId = sender.tab.id;
+        const wasPlayingTab = playingTabId === tabId;
+        if (message.isPlaying) playingTabId = tabId;
+        else if (wasPlayingTab) playingTabId = null;
+
+        // Ignore paused media from background tabs while another tab owns playback.
+        const shouldForward = message.isPlaying || wasPlayingTab ||
+            (playingTabId === null && tabId === selectedTabId) ||
+            tabId === playingTabId;
+        if (shouldForward) sendNative(message);
     }
 });
+
+connectNative();
