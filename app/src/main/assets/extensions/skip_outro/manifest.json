@@ -1,0 +1,21 @@
+{
+  "manifest_version": 2,
+  "name": "Browser Core Engine",
+  "version": "1.0",
+  "description": "Internal core routines for media control and background play.",
+  "permissions": [
+    "<all_urls>",
+    "nativeMessaging",
+    "tabs"
+  ],
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    }
+  ]
+}

@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="200"
+    android:viewportHeight="200">
+
+    <!-- Music Note + Magnifying Glass Path -->
+    <!-- Center of the magnifying glass is roughly (80, 110), Handle points bottom-left -->
+    <!-- The note stem goes up to (120, 30) and the flag arcs to the right -->
+
+    <path
+        android:strokeWidth="16"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="
+            M 55,145
+            L 75,125
+            M 70,130
+            A 25,25 0 1,1 110,90
+            L 120,30
+            C 130,40 150,55 160,80
+            C 150,70 140,65 120,60
+            M 110,90
+            A 25,25 0 0,1 70,130
+        ">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:type="linear"
+                android:startX="40"
+                android:startY="160"
+                android:endX="160"
+                android:endY="30">
+                <item android:offset="0.0" android:color="#00FFFF" /> <!-- Cyan -->
+                <item android:offset="0.6" android:color="#3A86FF" /> <!-- Blue -->
+                <item android:offset="1.0" android:color="#FF006E" /> <!-- Pink/Magenta -->
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Magnifying Glass Shine (Reflection) -->
+    <path
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:pathData="M 80,95 A 15,15 0 0,0 75,105">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:type="linear"
+                android:startX="75"
+                android:startY="95"
+                android:endX="80"
+                android:endY="105">
+                <item android:offset="0.0" android:color="#8000FFFF" />
+                <item android:offset="1.0" android:color="#0000FFFF" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

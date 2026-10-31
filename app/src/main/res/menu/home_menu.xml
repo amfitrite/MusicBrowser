@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:id="@+id/home_yt"
+        android:title="@string/home_yt" />
+    <item
+        android:id="@+id/home_ytm"
+        android:title="@string/home_ytm" />
+    <item
+        android:id="@+id/home_spotify"
+        android:title="@string/home_spotify" />
+    <item
+        android:id="@+id/home_soundcloud"
+        android:title="@string/home_soundcloud" />
+    <item
+        android:id="@+id/home_applemusic"
+        android:title="@string/home_applemusic" />
+</menu>

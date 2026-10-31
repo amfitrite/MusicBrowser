@@ -1,0 +1,17 @@
+{
+  "manifest_version": 2,
+  "name": "Video Background Play Fix",
+  "version": "1.0",
+  "description": "Play video in background.",
+  "permissions": [
+    "<all_urls>"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ]
+}
