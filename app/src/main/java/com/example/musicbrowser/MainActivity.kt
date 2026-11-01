@@ -11,7 +11,9 @@ import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.PopupMenu
+import android.widget.TextView
 import android.widget.Toast
+import android.view.Choreographer
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import android.content.Intent
@@ -43,6 +45,39 @@ class MainActivity : AppCompatActivity() {
     private var currentTitle: String = "Unknown Title"
     private var currentUrl: String = ""
 
+    // FPS Meter variables
+    private lateinit var fpsMeterText: TextView
+    private var isFpsMeterEnabled = true
+    private var frameCount = 0
+    private var lastFpsTime = 0L
+    private val frameCallback = object : Choreographer.FrameCallback {
+        override fun doFrame(frameTimeNanos: Long) {
+            if (!isFpsMeterEnabled) return
+
+            frameCount++
+            val currentTime = System.currentTimeMillis()
+            if (currentTime - lastFpsTime >= 1000) {
+                val fps = frameCount
+                fpsMeterText.text = "FPS: $fps"
+
+                // Color code based on performance
+                when {
+                    fps >= 55 -> fpsMeterText.setTextColor(android.graphics.Color.GREEN)
+                    fps >= 30 -> fpsMeterText.setTextColor(android.graphics.Color.YELLOW)
+                    else -> fpsMeterText.setTextColor(android.graphics.Color.RED)
+                }
+
+                frameCount = 0
+                lastFpsTime = currentTime
+            }
+            Choreographer.getInstance().postFrameCallback(this)
+        }
+    }
+
+    // Settings cache for scroll optimization
+    private var isAutoHideEnabledCache: Boolean = true
+    private var toolbarSensitivityCache: String = "FAST"
+
     // ActivityResultLauncher for picking .xpi files
     private val xpiFilePickerLauncher = registerForActivityResult(
         ActivityResultContracts.GetContent()
@@ -58,10 +93,19 @@ class MainActivity : AppCompatActivity() {
         val urlEditText = findViewById<EditText>(R.id.urlEditText)
         menuContainer = findViewById<MaterialCardView>(R.id.menuContainer)
         val settingsButton = findViewById<ImageButton>(R.id.settingsButton)
+        fpsMeterText = findViewById(R.id.fpsMeterText)
+
+        // Initialize FPS Meter
+        val initPrefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        isFpsMeterEnabled = initPrefs.getBoolean("FPS_METER_ENABLED", true)
+        updateFpsMeterVisibility()
+
+        // Cache scroll settings to avoid SharedPreferences I/O on main thread during scroll
+        isAutoHideEnabledCache = initPrefs.getBoolean("AUTO_HIDE_TOOLBAR", true)
+        toolbarSensitivityCache = initPrefs.getString("TOOLBAR_SENSITIVITY", "FAST") ?: "FAST"
 
         // Keep the browser session process-scoped so media playback can survive
         // Activity recreation and moving the app to the background.
-        val initPrefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val bgPlayEnabled = initPrefs.getBoolean("BACKGROUND_PLAY_ENABLED", true)
 
         if (BrowserSessionStore.runtime == null) {
@@ -190,10 +234,7 @@ class MainActivity : AppCompatActivity() {
 
         geckoSession.scrollDelegate = object : GeckoSession.ScrollDelegate {
             override fun onScrollChanged(session: GeckoSession, scrollX: Int, scrollY: Int) {
-                val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                val autoHideEnabled = prefs.getBoolean("AUTO_HIDE_TOOLBAR", true)
-
-                if (!autoHideEnabled) {
+                if (!isAutoHideEnabledCache) {
                     if (isTopBarHidden) {
                         showTopBar()
                         isTopBarHidden = false
@@ -201,9 +242,8 @@ class MainActivity : AppCompatActivity() {
                     return
                 }
 
-                val sensitivity = prefs.getString("TOOLBAR_SENSITIVITY", "FAST")
-                val hideThreshold = if (sensitivity == "SLOW") 30 else 2
-                val showThreshold = if (sensitivity == "SLOW") -20 else -2
+                val hideThreshold = if (toolbarSensitivityCache == "SLOW") 30 else 2
+                val showThreshold = if (toolbarSensitivityCache == "SLOW") -20 else -2
 
                 val dy = scrollY - lastScrollY
                 if (dy > hideThreshold && scrollY > 10 && !isTopBarHidden) {
@@ -399,6 +439,18 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             popup.show()
+        }
+    }
+
+    private fun updateFpsMeterVisibility() {
+        Choreographer.getInstance().removeFrameCallback(frameCallback)
+        if (isFpsMeterEnabled) {
+            fpsMeterText.visibility = View.VISIBLE
+            lastFpsTime = System.currentTimeMillis()
+            frameCount = 0
+            Choreographer.getInstance().postFrameCallback(frameCallback)
+        } else {
+            fpsMeterText.visibility = View.GONE
         }
     }
 
@@ -620,6 +672,20 @@ class MainActivity : AppCompatActivity() {
             setSelection(if (currentSens == "FAST") 0 else 1)
         }
 
+        // --- FPS Meter Selection ---
+        val fpsLabel = android.widget.TextView(this).apply {
+            text = "Show FPS Meter"
+            textSize = 14f
+            setTextColor(android.graphics.Color.GRAY)
+            setPadding(0, 32, 0, 8)
+        }
+        val fpsSpinner = android.widget.Spinner(this).apply {
+            val fpsOptions = arrayOf("Enabled (Default)", "Disabled")
+            adapter = android.widget.ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, fpsOptions)
+            val currentFps = prefs.getBoolean("FPS_METER_ENABLED", true)
+            setSelection(if (currentFps) 0 else 1)
+        }
+
         settingsLayout.addView(searchLabel)
         settingsLayout.addView(searchSpinner)
         settingsLayout.addView(outroLabel)
@@ -634,6 +700,8 @@ class MainActivity : AppCompatActivity() {
         settingsLayout.addView(sensitivitySpinner)
         settingsLayout.addView(posLabel)
         settingsLayout.addView(posSpinner)
+        settingsLayout.addView(fpsLabel)
+        settingsLayout.addView(fpsSpinner)
 
         AlertDialog.Builder(this)
             .setTitle("Browser Settings")
@@ -648,6 +716,7 @@ class MainActivity : AppCompatActivity() {
                 val autoHideEnabled = autoHideSpinner.selectedItemPosition == 0
                 val selectedPos = posValues[posSpinner.selectedItemPosition]
                 val selectedSens = sensitivityValues[sensitivitySpinner.selectedItemPosition]
+                val fpsEnabled = fpsSpinner.selectedItemPosition == 0
 
                 prefs.edit()
                     .putString("SEARCH_ENGINE", engineValues[searchSpinner.selectedItemPosition])
@@ -657,8 +726,16 @@ class MainActivity : AppCompatActivity() {
                     .putBoolean("AUTO_HIDE_TOOLBAR", autoHideEnabled)
                     .putString("TOOLBAR_POSITION", selectedPos)
                     .putString("TOOLBAR_SENSITIVITY", selectedSens)
+                    .putBoolean("FPS_METER_ENABLED", fpsEnabled)
                     .apply()
                     
+                isFpsMeterEnabled = fpsEnabled
+                updateFpsMeterVisibility()
+
+                // Update scroll cache
+                isAutoHideEnabledCache = autoHideEnabled
+                toolbarSensitivityCache = selectedSens
+
                 geckoSession.settings.setSuspendMediaWhenInactive(!bgEnabled)
                 geckoSession.setActive(bgEnabled)
                 
@@ -1074,6 +1151,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onPause() {
+        Choreographer.getInstance().removeFrameCallback(frameCallback)
         val isBgEnabled = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getBoolean("BACKGROUND_PLAY_ENABLED", true)
         if (isBgEnabled) {
             geckoSession.setActive(true)
@@ -1091,6 +1169,12 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        if (isFpsMeterEnabled) {
+            lastFpsTime = System.currentTimeMillis()
+            frameCount = 0
+            Choreographer.getInstance().removeFrameCallback(frameCallback)
+            Choreographer.getInstance().postFrameCallback(frameCallback)
+        }
         geckoSession.setActive(true)
     }
 
