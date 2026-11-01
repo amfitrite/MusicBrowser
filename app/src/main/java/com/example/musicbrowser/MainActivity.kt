@@ -167,8 +167,20 @@ class MainActivity : AppCompatActivity() {
 
         if (BrowserSessionStore.runtime == null) {
             val configFile = File(filesDir, "gecko_config.yaml")
-            val configContent = "prefs:\n  layout.frame_rate: 0\n"
-            FileOutputStream(configFile).use { it.write(configContent.toByteArray()) }
+            // Match Mozilla Talos ASAP mode: do not pace Gecko's refresh driver
+            // to the display refresh interval during throughput experiments.
+            val configContent = """
+                prefs:
+                  layout.frame_rate: 0
+                  docshell.event_starvation_delay_hint: 1
+            """.trimIndent() + "\n"
+            FileOutputStream(configFile).use {
+                it.write(configContent.toByteArray(Charsets.UTF_8))
+            }
+            android.util.Log.i(
+                "GeckoPerf",
+                "Starting Gecko with Talos ASAP preferences: layout.frame_rate=0, docshell.event_starvation_delay_hint=1"
+            )
 
             val runtimeSettings = org.mozilla.geckoview.GeckoRuntimeSettings.Builder()
                 .allowInsecureConnections(org.mozilla.geckoview.GeckoRuntimeSettings.ALLOW_ALL)
