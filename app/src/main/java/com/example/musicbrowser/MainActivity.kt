@@ -104,14 +104,6 @@ class MainActivity : AppCompatActivity() {
         autoHideToolbar = initPrefs.getBoolean("AUTO_HIDE_TOOLBAR", true)
         toolbarSensitivity = initPrefs.getString("TOOLBAR_SENSITIVITY", "FAST") ?: "FAST"
         toolbarPosition = initPrefs.getString("TOOLBAR_POSITION", "BOTTOM") ?: "BOTTOM"
-=======
-        // Initialize FPS Meter
-        val initPrefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        isFpsMeterEnabled = initPrefs.getBoolean("FPS_METER_ENABLED", true)
-        updateFpsMeterVisibility()
-
-        // Keep the browser session process-scoped so media playback can survive
-        // Activity recreation and moving the app to the background.
 
         if (BrowserSessionStore.runtime == null) {
             val runtimeSettings = org.mozilla.geckoview.GeckoRuntimeSettings.Builder()
