@@ -47,8 +47,11 @@ class MainActivity : AppCompatActivity() {
     // Cached SharedPreferences values for performance
     private var bgPlayEnabled: Boolean = true
     private var autoHideToolbar: Boolean = true
-    private var toolbarSensitivity: String = "FAST"
-    private var toolbarPosition: String = "BOTTOM"
+
+    // Performance optimization: cache as booleans for high-frequency events
+    private var isToolbarPositionTop: Boolean = false
+    private var isToolbarSensitivitySlow: Boolean = false
+    private var searchEngine: String = "google"
 
     // FPS Meter variables
     private lateinit var fpsMeterText: TextView
@@ -102,8 +105,9 @@ class MainActivity : AppCompatActivity() {
 
         bgPlayEnabled = initPrefs.getBoolean("BACKGROUND_PLAY_ENABLED", true)
         autoHideToolbar = initPrefs.getBoolean("AUTO_HIDE_TOOLBAR", true)
-        toolbarSensitivity = initPrefs.getString("TOOLBAR_SENSITIVITY", "FAST") ?: "FAST"
-        toolbarPosition = initPrefs.getString("TOOLBAR_POSITION", "BOTTOM") ?: "BOTTOM"
+        isToolbarSensitivitySlow = initPrefs.getString("TOOLBAR_SENSITIVITY", "FAST") == "SLOW"
+        isToolbarPositionTop = initPrefs.getString("TOOLBAR_POSITION", "BOTTOM") == "TOP"
+        searchEngine = initPrefs.getString("SEARCH_ENGINE", "google") ?: "google"
 
         if (BrowserSessionStore.runtime == null) {
             val runtimeSettings = org.mozilla.geckoview.GeckoRuntimeSettings.Builder()
@@ -239,8 +243,8 @@ class MainActivity : AppCompatActivity() {
                     return
                 }
 
-                val hideThreshold = if (toolbarSensitivity == "SLOW") 30 else 2
-                val showThreshold = if (toolbarSensitivity == "SLOW") -20 else -2
+                val hideThreshold = if (isToolbarSensitivitySlow) 30 else 2
+                val showThreshold = if (isToolbarSensitivitySlow) -20 else -2
 
                 val dy = scrollY - lastScrollY
                 if (dy > hideThreshold && scrollY > 10 && !isTopBarHidden) {
@@ -475,7 +479,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun applyToolbarPosition() {
         val layoutParams = menuContainer.layoutParams as androidx.constraintlayout.widget.ConstraintLayout.LayoutParams
-        if (toolbarPosition == "TOP") {
+        if (isToolbarPositionTop) {
             layoutParams.topToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
             layoutParams.bottomToBottom = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET
             layoutParams.topMargin = 12.dpToPx()
@@ -494,7 +498,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun hideTopBar() {
-        val targetY = if (toolbarPosition == "TOP") -menuContainer.height.toFloat() - 200f else menuContainer.height.toFloat() + 200f
+        val targetY = if (isToolbarPositionTop) -menuContainer.height.toFloat() - 200f else menuContainer.height.toFloat() + 200f
 
         menuContainer.animate()
             .translationY(targetY)
@@ -533,8 +537,8 @@ class MainActivity : AppCompatActivity() {
                             return true
                         }
                     } else {
-                        val minDiffY = if (toolbarSensitivity == "SLOW") 100 else 25
-                        val minVelocity = if (toolbarSensitivity == "SLOW") 150 else 30
+                        val minDiffY = if (isToolbarSensitivitySlow) 100 else 25
+                        val minVelocity = if (isToolbarSensitivitySlow) 150 else 30
 
                         if (diffY < -minDiffY && Math.abs(velocityY) > minVelocity) {
                             hideTopBar()
@@ -564,11 +568,9 @@ class MainActivity : AppCompatActivity() {
                 url = if (url.contains(".") && !url.contains(" ")) {
                     "https://$url"
                 } else {
-                    val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                    val engine = prefs.getString("SEARCH_ENGINE", "google")
-                    if (engine == "duckduckgo") {
+                    if (searchEngine == "duckduckgo") {
                         "https://duckduckgo.com/?q=$url"
-                    } else if (engine == "bing") {
+                    } else if (searchEngine == "bing") {
                         "https://www.bing.com/search?q=$url"
                     } else {
                         "https://www.google.com/search?q=$url"
@@ -731,8 +733,10 @@ class MainActivity : AppCompatActivity() {
                 val selectedSens = sensitivityValues[sensitivitySpinner.selectedItemPosition]
                 val fpsEnabled = fpsSpinner.selectedItemPosition == 0
 
+                val selectedEngine = engineValues[searchSpinner.selectedItemPosition]
+
                 prefs.edit()
-                    .putString("SEARCH_ENGINE", engineValues[searchSpinner.selectedItemPosition])
+                    .putString("SEARCH_ENGINE", selectedEngine)
                     .putInt("SKIP_OUTRO_TIME", timeValues[outroSpinner.selectedItemPosition])
                     .putString("SKIP_OUTRO_METHOD", methodValues[methodSpinner.selectedItemPosition])
                     .putBoolean("BACKGROUND_PLAY_ENABLED", bgEnabled)
@@ -744,8 +748,9 @@ class MainActivity : AppCompatActivity() {
                     
                 bgPlayEnabled = bgEnabled
                 autoHideToolbar = autoHideEnabled
-                toolbarSensitivity = selectedSens
-                toolbarPosition = selectedPos ?: "BOTTOM"
+                isToolbarSensitivitySlow = selectedSens == "SLOW"
+                isToolbarPositionTop = selectedPos == "TOP"
+                searchEngine = selectedEngine
                 isFpsMeterEnabled = fpsEnabled
                 updateFpsMeterVisibility()
 
