@@ -8,97 +8,189 @@ import android.app.Service
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
-import androidx.core.app.NotificationCompat
 import android.os.PowerManager
+import androidx.core.app.NotificationCompat
+import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
+import android.support.v4.media.session.PlaybackStateCompat
 import androidx.media.app.NotificationCompat as MediaNotificationCompat
 
+/** Android MediaSession, lock-screen and notification controls for browser playback. */
 class BrowserService : Service() {
+    companion object {
+        const val ACTION_MEDIA_STATE = "com.example.musicbrowser.MEDIA_STATE"
+        const val ACTION_NEXT = "com.example.musicbrowser.NEXT"
+        const val ACTION_PREVIOUS = "com.example.musicbrowser.PREVIOUS"
+        const val ACTION_TOGGLE = "com.example.musicbrowser.TOGGLE"
+        const val EXTRA_TITLE = "title"
+        const val EXTRA_ARTIST = "artist"
+        const val EXTRA_URL = "url"
+        const val EXTRA_PROVIDER = "provider"
+        const val EXTRA_ARTWORK = "artwork"
+        const val EXTRA_DURATION = "duration"
+        const val EXTRA_POSITION = "position"
+        const val EXTRA_PLAYING = "playing"
+    }
 
-    private val CHANNEL_ID = "MusicBrowserChannel"
-    private val NOTIFICATION_ID = 1
+    private val channelId = "MusicBrowserChannel"
+    private val notificationId = 1
     private var mediaSession: MediaSessionCompat? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var foregroundStarted = false
+    private var title = "Music Browser"
+    private var artist = ""
+    private var provider = ""
+    private var durationMs = 0L
+    private var positionMs = 0L
+    private var playing = false
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        
-        val powerManager = getSystemService(POWER_SERVICE) as PowerManager
-        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MusicBrowser::BgPlayWakeLock")
+        val power = getSystemService(POWER_SERVICE) as PowerManager
+        wakeLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MusicBrowser::Playback").apply {
+            setReferenceCounted(false)
+        }
+        mediaSession = MediaSessionCompat(this, "MusicBrowserMediaSession").apply {
+            setCallback(object : MediaSessionCompat.Callback() {
+                override fun onPlay() = BrowserBridge.sendMediaCommand("play")
+                override fun onPause() = BrowserBridge.sendMediaCommand("pause")
+                override fun onSkipToNext() = BrowserBridge.sendMediaCommand("next")
+                override fun onSkipToPrevious() = BrowserBridge.sendMediaCommand("prev")
+            })
+            isActive = true
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val notificationIntent = Intent(this, MainActivity::class.java)
-        val pendingIntent = PendingIntent.getActivity(
-            this, 0, notificationIntent,
-            PendingIntent.FLAG_IMMUTABLE
-        )
-        
-        if (mediaSession == null) {
-            mediaSession = MediaSessionCompat(this, "BrowserMediaSession")
-        }
-        
-        // Force Android to believe we are constantly PLAYING media.
-        // This is the #1 reason Android kills background apps when the screen turns off.
-        val stateBuilder = android.support.v4.media.session.PlaybackStateCompat.Builder()
-            .setActions(android.support.v4.media.session.PlaybackStateCompat.ACTION_PLAY_PAUSE or android.support.v4.media.session.PlaybackStateCompat.ACTION_SKIP_TO_NEXT or android.support.v4.media.session.PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS)
-            .setState(android.support.v4.media.session.PlaybackStateCompat.STATE_PLAYING, 0, 1.0f)
-        mediaSession?.setPlaybackState(stateBuilder.build())
-        
-        // Setup Media Buttons Intents
-        val playPauseIntent = Intent("com.example.musicbrowser.MEDIA_CTRL").apply { putExtra("cmd", "play_pause") }
-        val prevIntent = Intent("com.example.musicbrowser.MEDIA_CTRL").apply { putExtra("cmd", "prev") }
-        val nextIntent = Intent("com.example.musicbrowser.MEDIA_CTRL").apply { putExtra("cmd", "next") }
-
-        val pPlayPause = PendingIntent.getBroadcast(this, 1, playPauseIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-        val pPrev = PendingIntent.getBroadcast(this, 2, prevIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-        val pNext = PendingIntent.getBroadcast(this, 3, nextIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-
-        val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Music Browser")
-            .setContentText("Media Controller")
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentIntent(pendingIntent)
-            .addAction(android.R.drawable.ic_media_previous, "Previous", pPrev)
-            .addAction(android.R.drawable.ic_media_play, "Play/Pause", pPlayPause)
-            .addAction(android.R.drawable.ic_media_next, "Next", pNext)
-            .setStyle(MediaNotificationCompat.MediaStyle()
-                .setShowActionsInCompactView(0, 1, 2)
-                .setMediaSession(mediaSession?.sessionToken))
-            .build()
-
-        startForeground(NOTIFICATION_ID, notification)
-        
-        if (wakeLock?.isHeld == false) {
-            wakeLock?.acquire()
+        when (intent?.action) {
+            ACTION_MEDIA_STATE -> updateFromIntent(intent)
+            ACTION_NEXT -> BrowserBridge.sendMediaCommand("next")
+            ACTION_PREVIOUS -> BrowserBridge.sendMediaCommand("prev")
+            ACTION_TOGGLE -> BrowserBridge.sendMediaCommand("play_pause")
         }
 
-        // START_STICKY tells the OS to recreate the service if it has enough memory
+        if (!foregroundStarted) {
+            startForeground(notificationId, buildNotification())
+            foregroundStarted = true
+        } else {
+            refreshSession()
+            updateNotification()
+        }
         return START_STICKY
     }
 
-    override fun onDestroy() {
-        mediaSession?.release()
-        if (wakeLock?.isHeld == true) {
-            wakeLock?.release()
+    private fun updateFromIntent(intent: Intent) {
+        title = intent.getStringExtra(EXTRA_TITLE).orEmpty().ifBlank { "Music Browser" }
+        artist = intent.getStringExtra(EXTRA_ARTIST).orEmpty()
+        provider = intent.getStringExtra(EXTRA_PROVIDER).orEmpty()
+        durationMs = intent.getLongExtra(EXTRA_DURATION, 0L)
+        positionMs = intent.getLongExtra(EXTRA_POSITION, 0L)
+        playing = intent.getBooleanExtra(EXTRA_PLAYING, false)
+        updateWakeLock()
+        refreshSession()
+    }
+
+    private fun refreshSession() {
+        val session = mediaSession ?: return
+        val state = when {
+            playing -> PlaybackStateCompat.STATE_PLAYING
+            title != "Music Browser" -> PlaybackStateCompat.STATE_PAUSED
+            else -> PlaybackStateCompat.STATE_NONE
         }
+        val actions = PlaybackStateCompat.ACTION_PLAY or PlaybackStateCompat.ACTION_PAUSE or
+            PlaybackStateCompat.ACTION_PLAY_PAUSE or PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
+            PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
+        session.setPlaybackState(
+            PlaybackStateCompat.Builder()
+                .setActions(actions)
+                .setState(state, positionMs, if (playing) 1f else 0f)
+                .build()
+        )
+        session.setMetadata(
+            MediaMetadataCompat.Builder()
+                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
+                .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist)
+                .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, provider)
+                .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durationMs)
+                .build()
+        )
+        session.isActive = true
+    }
+
+    private fun updateWakeLock() {
+        val lock = wakeLock ?: return
+        if (playing) {
+            try {
+                // Acquire only when needed; the bounded lock is reacquired after it expires.
+                if (!lock.isHeld) lock.acquire(10 * 60 * 1000L)
+            } catch (_: Exception) {
+            }
+        } else if (lock.isHeld) {
+            try { lock.release() } catch (_: Exception) {}
+        }
+    }
+
+    private fun updateNotification() {
+        (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
+            .notify(notificationId, buildNotification())
+    }
+
+    private fun buildNotification(): Notification {
+        val open = PendingIntent.getActivity(
+            this, 0, Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val previous = serviceIntent(ACTION_PREVIOUS, 2)
+        val toggle = serviceIntent(ACTION_TOGGLE, 3)
+        val next = serviceIntent(ACTION_NEXT, 4)
+        val subtitle = listOf(artist, provider).filter { it.isNotBlank() }.joinToString(" · ")
+        return NotificationCompat.Builder(this, channelId)
+            .setContentTitle(title)
+            .setContentText(subtitle.ifBlank { "Universal Music Control" })
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentIntent(open)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setOnlyAlertOnce(true)
+            .setOngoing(playing)
+            .addAction(android.R.drawable.ic_media_previous, "Previous", previous)
+            .addAction(
+                if (playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
+                if (playing) "Pause" else "Play",
+                toggle
+            )
+            .addAction(android.R.drawable.ic_media_next, "Next", next)
+            .setStyle(
+                MediaNotificationCompat.MediaStyle()
+                    .setShowActionsInCompactView(0, 1, 2)
+                    .setMediaSession(mediaSession?.sessionToken)
+            )
+            .build()
+    }
+
+    private fun serviceIntent(action: String, requestCode: Int): PendingIntent =
+        PendingIntent.getService(
+            this, requestCode,
+            Intent(this, BrowserService::class.java).setAction(action),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+    override fun onDestroy() {
+        if (wakeLock?.isHeld == true) {
+            try { wakeLock?.release() } catch (_: Exception) {}
+        }
+        mediaSession?.isActive = false
+        mediaSession?.release()
+        mediaSession = null
         super.onDestroy()
     }
 
-    override fun onBind(intent: Intent?): IBinder? {
-        return null
-    }
+    override fun onBind(intent: Intent?): IBinder? = null
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val serviceChannel = NotificationChannel(
-                CHANNEL_ID,
-                "Background Service Channel",
-                NotificationManager.IMPORTANCE_LOW
-            )
-            val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(serviceChannel)
+            val channel = NotificationChannel(channelId, "Music playback", NotificationManager.IMPORTANCE_LOW)
+            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
     }
 }
