@@ -59,13 +59,11 @@ class MainActivity : AppCompatActivity() {
     // FPS meter + display performance variables
     private lateinit var fpsMeterText: TextView
     private var isFpsMeterEnabled = true
-    private var isVsyncEnabled = false
     private var performanceModeEnabled = true
     private var maxSupportedRefreshRate = 60f
     private var displayRefreshRate = 60f
     private var targetRefreshRate = 60f
     private var frameCount = 0
-    private var jankFrameCount = 0
     private var droppedFrameCount = 0
     private var frameIntervalTotalNanos = 0L
     private var frameIntervalSamples = 0
@@ -87,7 +85,6 @@ class MainActivity : AppCompatActivity() {
                 frameIntervalTotalNanos += delta
                 frameIntervalSamples++
                 if (delta > expectedInterval * 1.5) {
-                    jankFrameCount++
                     droppedFrameCount += ((delta / expectedInterval).toInt() - 1).coerceAtLeast(1)
                 }
             }
@@ -114,7 +111,6 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 frameCount = 0
-                jankFrameCount = 0
                 droppedFrameCount = 0
                 frameIntervalTotalNanos = 0L
                 frameIntervalSamples = 0
@@ -144,7 +140,6 @@ class MainActivity : AppCompatActivity() {
 
         val initPrefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         isFpsMeterEnabled = initPrefs.getBoolean("FPS_METER_ENABLED", true)
-        isVsyncEnabled = initPrefs.getBoolean("VSYNC_ENABLED", false)
         performanceModeEnabled = initPrefs.getBoolean("PERFORMANCE_MODE_ENABLED", true)
         instantTapEnabled = initPrefs.getBoolean("INSTANT_TAP_ENABLED", true)
         applyDisplayPerformance()
@@ -515,7 +510,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun resetFpsWindow() {
         frameCount = 0
-        jankFrameCount = 0
         droppedFrameCount = 0
         frameIntervalTotalNanos = 0L
         frameIntervalSamples = 0
@@ -823,7 +817,7 @@ class MainActivity : AppCompatActivity() {
 
         // --- Performance Mode / Max Refresh Rate Selection ---
         val performanceLabel = android.widget.TextView(this).apply {
-            text = "Performance Mode (Max Refresh Rate)"
+            text = "Maximum Performance (Highest Refresh Rate)"
             textSize = 14f
             setTextColor(android.graphics.Color.GRAY)
             setPadding(0, 32, 0, 8)
@@ -851,7 +845,7 @@ class MainActivity : AppCompatActivity() {
 
         // --- FPS Meter Selection ---
         val fpsLabel = android.widget.TextView(this).apply {
-            text = "Show FPS Meter"
+            text = "Show FPS & Frame Stability"
             textSize = 14f
             setTextColor(android.graphics.Color.GRAY)
             setPadding(0, 32, 0, 8)
@@ -864,19 +858,6 @@ class MainActivity : AppCompatActivity() {
         }
 
         // --- VSYNC Status Selection ---
-        val vsyncLabel = android.widget.TextView(this).apply {
-            text = "VSYNC Status"
-            textSize = 14f
-            setTextColor(android.graphics.Color.GRAY)
-            setPadding(0, 32, 0, 8)
-        }
-        val vsyncSpinner = android.widget.Spinner(this).apply {
-            val vsyncOptions = arrayOf("Disabled (Default / Max Benchmark)", "Enabled (VSYNC Sync)")
-            adapter = android.widget.ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, vsyncOptions)
-            val currentVsync = prefs.getBoolean("VSYNC_ENABLED", false)
-            setSelection(if (!currentVsync) 0 else 1)
-        }
-
         settingsLayout.addView(searchLabel)
         settingsLayout.addView(searchSpinner)
         settingsLayout.addView(outroLabel)
@@ -897,8 +878,6 @@ class MainActivity : AppCompatActivity() {
         settingsLayout.addView(instantTapSpinner)
         settingsLayout.addView(fpsLabel)
         settingsLayout.addView(fpsSpinner)
-        settingsLayout.addView(vsyncLabel)
-        settingsLayout.addView(vsyncSpinner)
 
         // Keep every option reachable on short screens now that the list is longer.
         val settingsScroll = android.widget.ScrollView(this).apply {
@@ -921,7 +900,6 @@ class MainActivity : AppCompatActivity() {
                 val fpsEnabled = fpsSpinner.selectedItemPosition == 0
                 val performanceEnabled = performanceSpinner.selectedItemPosition == 0
                 val instantTap = instantTapSpinner.selectedItemPosition == 0
-                val vsyncEnabled = vsyncSpinner.selectedItemPosition == 1
 
                 prefs.edit()
                     .putString("SEARCH_ENGINE", engineValues[searchSpinner.selectedItemPosition])
@@ -934,7 +912,6 @@ class MainActivity : AppCompatActivity() {
                     .putBoolean("PERFORMANCE_MODE_ENABLED", performanceEnabled)
                     .putBoolean("INSTANT_TAP_ENABLED", instantTap)
                     .putBoolean("FPS_METER_ENABLED", fpsEnabled)
-                    .putBoolean("VSYNC_ENABLED", vsyncEnabled)
                     .apply()
                     
                 bgPlayEnabled = bgEnabled
@@ -942,7 +919,6 @@ class MainActivity : AppCompatActivity() {
                 toolbarSensitivity = selectedSens
                 toolbarPosition = selectedPos ?: "BOTTOM"
                 isFpsMeterEnabled = fpsEnabled
-                isVsyncEnabled = vsyncEnabled
                 performanceModeEnabled = performanceEnabled
                 instantTapEnabled = instantTap
                 geckoRuntime.settings.setDoubleTapZoomingEnabled(!instantTap)
