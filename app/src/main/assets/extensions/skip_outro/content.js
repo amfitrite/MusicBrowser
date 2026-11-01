@@ -250,8 +250,8 @@
     const pageHintNodes = new Map();
     const mediaOriginalPreload = new Map();
     const mediaPrefetchers = [];
-    const observedLinks = new WeakSet();
-    const observedMedia = new WeakSet();
+    let observedLinks = new WeakSet();
+    let observedMedia = new WeakSet();
 
     function prefetchNetworkAllowed() {
         const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
@@ -277,7 +277,7 @@
         return /(?:logout|log-out|signout|sign-out|delete|remove-account|unsubscribe|purchase|checkout|payment|add-to-cart)(?:[/?#=_-]|$)/i.test(url);
     }
 
-    function appendPrefetchHint(url, asType) {
+    function appendPrefetchHint(url) {
         if (!quicklinkEnabled || !prefetchNetworkAllowed()) return null;
         const normalized = normalizePrefetchUrl(url);
         if (!normalized || pageHintNodes.has(normalized)) return null;
@@ -285,7 +285,6 @@
             const hint = document.createElement("link");
             hint.rel = "prefetch";
             hint.href = normalized;
-            if (asType) hint.as = asType;
             hint.referrerPolicy = "strict-origin-when-cross-origin";
             (document.head || document.documentElement).appendChild(hint);
             pageHintNodes.set(normalized, hint);
@@ -297,7 +296,7 @@
 
     function prefetchPage(url) {
         if (pagePrefetchCount >= MAX_PAGE_PREFETCHES || prefetchedPages.has(url)) return;
-        if (!appendPrefetchHint(url, "document")) return;
+        if (!appendPrefetchHint(url)) return;
         prefetchedPages.add(url);
         pagePrefetchCount++;
     }
@@ -312,7 +311,7 @@
 
     function prefetchPoster(media) {
         const poster = media.poster;
-        if (poster) appendPrefetchHint(poster, "image");
+        if (poster) appendPrefetchHint(poster);
     }
 
     function warmMediaElement(media, userIntent) {
@@ -440,6 +439,9 @@
         mediaPrefetchers.length = 0;
         pagePrefetchCount = 0;
         mediaAutoPreloadCount = 0;
+        prefetchedPages.clear();
+        observedLinks = new WeakSet();
+        observedMedia = new WeakSet();
     }
 
     function startQuicklink() {
