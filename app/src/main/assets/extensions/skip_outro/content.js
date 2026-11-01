@@ -4,6 +4,7 @@
     let lastReport = 0;
     let lastTrackKey = "";
     let lastTime = 0;
+    let lastSkipAttemptAt = 0;
     let activeMedia = null;
     const attached = new WeakSet();
 
@@ -83,18 +84,31 @@
 
     function findButton(kind) {
         const next = [
-            "[data-testid='control-button-skip-forward']", "[data-testid='next-button']",
-            ".skipControl__next", ".ytp-next-button", "ytmusic-player-bar .next-button",
-            "button[aria-label*='Next' i]", "button[title*='Next' i]"
+            // Spotify desktop/web player and common player controls.
+            "[data-testid='control-button-skip-forward']",
+            "[data-testid='next-button']",
+            "button[data-testid*='skip-forward']",
+            // SoundCloud and YouTube / YouTube Music.
+            ".skipControl__next", ".playControls__next", ".ytp-next-button",
+            "ytmusic-player-bar .next-button",
+            "ytmusic-player-bar button[aria-label*='Next' i]",
+            // Generic accessible controls, including localized/alternate markup.
+            "button[aria-label*='Next track' i]", "button[aria-label*='Next song' i]",
+            "button[aria-label*='Next' i]", "button[title*='Next' i]",
+            "button[aria-label*='Berikutnya' i]", "button[title*='Berikutnya' i]"
         ];
         const previous = [
             "[data-testid='control-button-skip-back']", "[data-testid='previous-button']",
-            ".skipControl__previous", ".ytp-prev-button", "ytmusic-player-bar .previous-button",
+            ".skipControl__previous", ".playControls__prev", ".ytp-prev-button",
+            "ytmusic-player-bar .previous-button",
             "button[aria-label*='Previous' i]", "button[title*='Previous' i]"
         ];
         for (const selector of kind === "next" ? next : previous) {
-            const button = document.querySelector(selector);
-            if (button && !button.disabled && button.getAttribute("aria-disabled") !== "true") return button;
+            for (const button of document.querySelectorAll(selector)) {
+                if (button && !button.disabled &&
+                    button.getAttribute("aria-disabled") !== "true" &&
+                    button.getAttribute("disabled") === null) return button;
+            }
         }
         return null;
     }
@@ -103,9 +117,15 @@
         const media = getMedia();
         if (cmd === "next" || cmd === "prev") {
             const button = findButton(cmd);
-            if (button) button.click();
-            else if (media && cmd === "prev" && media.currentTime > 3) media.currentTime = 0;
-            return;
+            if (button) {
+                button.click();
+                return true;
+            }
+            if (media && cmd === "prev" && media.currentTime > 3) {
+                media.currentTime = 0;
+                return true;
+            }
+            return false;
         }
 
         if (media) {
@@ -179,10 +199,21 @@
             const remaining = media.duration - media.currentTime;
             const cycle = media.__musicBrowserCycle || 0;
             const key = lastTrackKey + "|" + cycle;
-            if (remaining > 0 && remaining <= skipSeconds && media.__musicBrowserSkipped !== key) {
-                media.__musicBrowserSkipped = key;
-                if (skipMethod === "A") browser.runtime.sendMessage({ action: "trigger_media_next" }).catch(() => {});
-                else command("next");
+            const now = Date.now();
+            if (remaining > 0 && remaining <= skipSeconds &&
+                media.__musicBrowserSkipped !== key && now - lastSkipAttemptAt >= 2000) {
+                lastSkipAttemptAt = now;
+                if (skipMethod === "A") {
+                    // Android media keys have no reliable completion acknowledgement.
+                    // The track-key guard below prevents repeated skips once playback advances.
+                    browser.runtime.sendMessage({ action: "trigger_media_next" }).catch(() => {});
+                    media.__musicBrowserSkipped = key;
+                } else if (command("next")) {
+                    // Only latch when a real Next control was found and clicked.
+                    // If no control exists, retry on the next monitor tick instead of
+                    // permanently marking the outro as skipped.
+                    media.__musicBrowserSkipped = key;
+                }
             }
         }
         report(false);
