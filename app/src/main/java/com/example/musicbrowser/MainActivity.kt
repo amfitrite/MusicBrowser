@@ -915,7 +915,7 @@ class MainActivity : AppCompatActivity() {
 
         // --- Google Quicklink Selection ---
         val quicklinkLabel = android.widget.TextView(this).apply {
-            text = "Google Quicklink (Instant Page Prefetch)"
+            text = "Smart Prefetch (Pages + Video)"
             textSize = 14f
             setTextColor(android.graphics.Color.GRAY)
             setPadding(0, 32, 0, 8)
