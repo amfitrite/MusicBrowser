@@ -233,12 +233,270 @@
         report(false);
     }
 
+    // Speculative preload engine: nearby links, posters, and HTML media.
+    // The setting is received through this extension's existing native bridge.
+    let quicklinkEnabled = false;
+    let quicklinkStarted = false;
+    let pageObserver = null;
+    let mediaObserver = null;
+    let domObserver = null;
+    let scanScheduled = false;
+    let pagePrefetchCount = 0;
+    let mediaAutoPreloadCount = 0;
+    const MAX_PAGE_PREFETCHES = 12;
+    const MAX_MEDIA_METADATA = 6;
+    const MAX_MEDIA_AUTO_PRELOADS = 1;
+    const prefetchedPages = new Set();
+    const pageHintNodes = new Map();
+    const mediaOriginalPreload = new Map();
+    const mediaPrefetchers = [];
+    const observedLinks = new WeakSet();
+    const observedMedia = new WeakSet();
+
+    function prefetchNetworkAllowed() {
+        const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+        if (!connection) return true;
+        const type = String(connection.effectiveType || "").toLowerCase();
+        return !connection.saveData &&
+            !/^(slow-2g|2g)$/.test(type) &&
+            !(Number(connection.downlink) > 0 && Number(connection.downlink) < 0.6);
+    }
+
+    function normalizePrefetchUrl(rawUrl) {
+        try {
+            const url = new URL(rawUrl, location.href);
+            if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+            if (url.href.split("#")[0] === location.href.split("#")[0]) return null;
+            return url.href;
+        } catch (_) {
+            return null;
+        }
+    }
+
+    function isActionLikeUrl(url) {
+        return /(?:logout|log-out|signout|sign-out|delete|remove-account|unsubscribe|purchase|checkout|payment|add-to-cart)(?:[/?#=_-]|$)/i.test(url);
+    }
+
+    function appendPrefetchHint(url, asType) {
+        if (!quicklinkEnabled || !prefetchNetworkAllowed()) return null;
+        const normalized = normalizePrefetchUrl(url);
+        if (!normalized || pageHintNodes.has(normalized)) return null;
+        try {
+            const hint = document.createElement("link");
+            hint.rel = "prefetch";
+            hint.href = normalized;
+            if (asType) hint.as = asType;
+            hint.referrerPolicy = "strict-origin-when-cross-origin";
+            (document.head || document.documentElement).appendChild(hint);
+            pageHintNodes.set(normalized, hint);
+            return hint;
+        } catch (_) {
+            return null;
+        }
+    }
+
+    function prefetchPage(url) {
+        if (pagePrefetchCount >= MAX_PAGE_PREFETCHES || prefetchedPages.has(url)) return;
+        if (!appendPrefetchHint(url, "document")) return;
+        prefetchedPages.add(url);
+        pagePrefetchCount++;
+    }
+
+    function mediaUrlFromElement(media) {
+        if (media.srcObject) return "";
+        const raw = media.currentSrc || media.src ||
+            (media.querySelector("source[src]") && media.querySelector("source[src]").src) || "";
+        if (!raw || /^(blob:|data:)/i.test(raw)) return "";
+        return normalizePrefetchUrl(raw) || "";
+    }
+
+    function prefetchPoster(media) {
+        const poster = media.poster;
+        if (poster) appendPrefetchHint(poster, "image");
+    }
+
+    function warmMediaElement(media, userIntent) {
+        if (!quicklinkEnabled || !prefetchNetworkAllowed() || !media || media.error) return;
+        if (media.paused === false || media.ended) return;
+        const mediaUrl = mediaUrlFromElement(media);
+        // MSE players (including many adaptive/DRM services) use blob: or
+        // MediaSource-managed segment requests. Changing their preload hint
+        // cannot safely prefetch those segments, so leave them to the player.
+        if (!mediaUrl) return;
+
+        prefetchPoster(media);
+        if (!mediaOriginalPreload.has(media)) {
+            mediaOriginalPreload.set(media, media.getAttribute("preload"));
+        }
+
+        const isVideo = media.tagName === "VIDEO";
+        const canUseAuto = isVideo &&
+            mediaAutoPreloadCount < MAX_MEDIA_AUTO_PRELOADS &&
+            (userIntent || media.getBoundingClientRect().top < window.innerHeight);
+        if (canUseAuto) {
+            media.preload = "auto";
+            mediaAutoPreloadCount++;
+        } else {
+            const metadataCount = Array.from(mediaOriginalPreload.keys()).length;
+            if (metadataCount > MAX_MEDIA_METADATA) return;
+            media.preload = "metadata";
+        }
+
+        if (media.readyState === 0) {
+            try { media.load(); } catch (_) {}
+        }
+    }
+
+    function prefetchDirectMediaLink(url) {
+        if (mediaPrefetchers.length >= 2 || !prefetchNetworkAllowed()) return;
+        if (!/\.(?:mp4|m4v|webm|mov|m3u8|mpd)(?:$|[?#])/i.test(url)) return;
+        try {
+            const media = document.createElement("video");
+            media.preload = "metadata";
+            media.muted = true;
+            media.playsInline = true;
+            media.src = url;
+            media.load();
+            mediaPrefetchers.push(media);
+        } catch (_) {}
+    }
+
+    function eligiblePageLink(link) {
+        if (!link || link.hasAttribute("download")) return null;
+        if ((link.getAttribute("rel") || "").toLowerCase().split(/\s+/).includes("nofollow")) return null;
+        const url = normalizePrefetchUrl(link.href);
+        if (!url || isActionLikeUrl(url)) return null;
+        return url;
+    }
+
+    function observePageLink(link) {
+        if (!quicklinkEnabled || observedLinks.has(link) || !pageObserver) return;
+        const url = eligiblePageLink(link);
+        if (!url) return;
+        observedLinks.add(link);
+        pageObserver.observe(link);
+    }
+
+    function observeMediaElement(media) {
+        if (!quicklinkEnabled || observedMedia.has(media) || !mediaObserver) return;
+        observedMedia.add(media);
+        mediaObserver.observe(media);
+    }
+
+    function scanPreloadCandidates() {
+        scanScheduled = false;
+        if (!quicklinkEnabled || !document.documentElement) return;
+        document.querySelectorAll("a[href]").forEach(observePageLink);
+        document.querySelectorAll("video, audio").forEach(observeMediaElement);
+    }
+
+    function schedulePreloadScan() {
+        if (scanScheduled || !quicklinkEnabled) return;
+        scanScheduled = true;
+        if ("requestIdleCallback" in window) {
+            requestIdleCallback(scanPreloadCandidates, { timeout: 1200 });
+        } else {
+            setTimeout(scanPreloadCandidates, 250);
+        }
+    }
+
+    function onPreloadIntent(event) {
+        if (!quicklinkEnabled || !prefetchNetworkAllowed()) return;
+        const target = event.target && event.target.closest ?
+            event.target.closest("a[href], video, audio") : null;
+        if (!target) return;
+        if (target.tagName === "A") {
+            const url = eligiblePageLink(target);
+            if (url) prefetchPage(url);
+            prefetchDirectMediaLink(target.href);
+        } else {
+            warmMediaElement(target, true);
+        }
+    }
+
+    function stopQuicklink() {
+        if (pageObserver) pageObserver.disconnect();
+        if (mediaObserver) mediaObserver.disconnect();
+        if (domObserver) domObserver.disconnect();
+        pageObserver = null;
+        mediaObserver = null;
+        domObserver = null;
+        quicklinkStarted = false;
+        scanScheduled = false;
+        document.removeEventListener("pointerover", onPreloadIntent, true);
+        document.removeEventListener("touchstart", onPreloadIntent, true);
+        document.removeEventListener("focusin", onPreloadIntent, true);
+        pageHintNodes.forEach(node => node.remove());
+        pageHintNodes.clear();
+        mediaOriginalPreload.forEach((original, media) => {
+            if (!media || !media.isConnected) return;
+            if (original === null) media.removeAttribute("preload");
+            else media.setAttribute("preload", original);
+        });
+        mediaOriginalPreload.clear();
+        mediaPrefetchers.forEach(media => {
+            try { media.pause(); media.removeAttribute("src"); media.load(); } catch (_) {}
+        });
+        mediaPrefetchers.length = 0;
+        pagePrefetchCount = 0;
+        mediaAutoPreloadCount = 0;
+    }
+
+    function startQuicklink() {
+        if (!quicklinkEnabled || quicklinkStarted || !prefetchNetworkAllowed()) return;
+        if (!document.documentElement) return;
+        quicklinkStarted = true;
+        pageObserver = new IntersectionObserver(entries => {
+            entries.forEach(entry => {
+                if (!entry.isIntersecting) return;
+                const link = entry.target;
+                const url = eligiblePageLink(link);
+                if (url) prefetchPage(url);
+                pageObserver.unobserve(link);
+            });
+        }, { rootMargin: "250px 0px" });
+
+        mediaObserver = new IntersectionObserver(entries => {
+            entries.forEach(entry => {
+                if (!entry.isIntersecting) return;
+                warmMediaElement(entry.target, false);
+                mediaObserver.unobserve(entry.target);
+            });
+        }, { rootMargin: "400px 0px" });
+
+        document.addEventListener("pointerover", onPreloadIntent, true);
+        document.addEventListener("touchstart", onPreloadIntent, { capture: true, passive: true });
+        document.addEventListener("focusin", onPreloadIntent, true);
+        schedulePreloadScan();
+
+        domObserver = new MutationObserver(schedulePreloadScan);
+        domObserver.observe(document.documentElement, { childList: true, subtree: true });
+    }
+
+    function configureQuicklink(enabled) {
+        quicklinkEnabled = enabled === true;
+        if (!quicklinkEnabled) {
+            stopQuicklink();
+            return;
+        }
+        startQuicklink();
+    }
+
+    const networkConnection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+    if (networkConnection && networkConnection.addEventListener) {
+        networkConnection.addEventListener("change", () => {
+            if (quicklinkEnabled && prefetchNetworkAllowed()) startQuicklink();
+            else if (quicklinkStarted && !prefetchNetworkAllowed()) stopQuicklink();
+        });
+    }
+
     let resumedMediaKey = "";
 
     browser.runtime.onMessage.addListener(message => {
         if (message.type === "SET_CONFIG") {
             skipSeconds = Math.max(0, Math.min(30, Number(message.skipTime) || 0));
             skipMethod = message.skipMethod === "A" ? "A" : "B";
+            configureQuicklink(message.quicklinkEnabled === true);
 
             const targetUrl = message.resumeMediaUrl;
             const targetTime = Number(message.resumeMediaPositionSec) || 0;
