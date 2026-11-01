@@ -84,12 +84,12 @@ class MainActivity : AppCompatActivity() {
                 val expectedInterval = 1_000_000_000.0 / displayRefreshRate.coerceAtLeast(1f)
                 frameIntervalTotalNanos += delta
                 frameIntervalSamples++
+                frameCount++
                 if (delta > expectedInterval * 1.5) {
                     droppedFrameCount += ((delta / expectedInterval).toInt() - 1).coerceAtLeast(1)
                 }
             }
             lastFrameTimeNanos = frameTimeNanos
-            frameCount++
 
             val elapsedNanos = frameTimeNanos - fpsWindowStartNanos
             if (elapsedNanos >= 1_000_000_000L) {
@@ -857,7 +857,6 @@ class MainActivity : AppCompatActivity() {
             setSelection(if (currentFps) 0 else 1)
         }
 
-        // --- VSYNC Status Selection ---
         settingsLayout.addView(searchLabel)
         settingsLayout.addView(searchSpinner)
         settingsLayout.addView(outroLabel)
