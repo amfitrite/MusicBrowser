@@ -103,12 +103,35 @@
             "ytmusic-player-bar .previous-button",
             "button[aria-label*='Previous' i]", "button[title*='Previous' i]"
         ];
-        for (const selector of kind === "next" ? next : previous) {
+        const selectors = kind === "next" ? next : previous;
+        const usable = button => button && !button.disabled &&
+            button.getAttribute("aria-disabled") !== "true" &&
+            button.getAttribute("disabled") === null &&
+            button.getAttribute("aria-hidden") !== "true" &&
+            button.getClientRects().length > 0;
+
+        // Prefer known player controls before generic labels to avoid clicking
+        // unrelated navigation links that happen to contain the word "next".
+        for (const selector of selectors) {
             for (const button of document.querySelectorAll(selector)) {
-                if (button && !button.disabled &&
-                    button.getAttribute("aria-disabled") !== "true" &&
-                    button.getAttribute("disabled") === null) return button;
+                if (usable(button)) return button;
             }
+        }
+
+        // Generic fallback for sites whose player uses ordinary buttons or
+        // role=button elements rather than a known platform-specific selector.
+        const labels = kind === "next"
+            ? /^(next|next track|next song|skip forward|berikutnya|lagu berikutnya|selanjutnya|siguiente|suivant|weiter|下一首|次の曲)$/i
+            : /^(previous|previous track|previous song|back|lagu sebelumnya|sebelumnya|anterior|précédent|zurück|上一首|前の曲)$/i;
+        for (const button of document.querySelectorAll("button, [role='button']")) {
+            if (!usable(button)) continue;
+            const label = [
+                button.getAttribute("aria-label"),
+                button.getAttribute("title"),
+                button.getAttribute("data-tooltip"),
+                button.innerText
+            ].filter(Boolean).join(" ").trim().replace(/\\s+/g, " ");
+            if (labels.test(label)) return button;
         }
         return null;
     }
