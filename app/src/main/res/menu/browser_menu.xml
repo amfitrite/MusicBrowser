@@ -18,7 +18,10 @@
     <group android:id="@+id/group_features">
         <item
             android:id="@+id/menu_my_playlist"
-            android:title="🎵 My Playlist" />
+            android:title="🎵 Unified Playlist" />
+        <item
+            android:id="@+id/menu_my_history"
+            android:title="🕘 Recently Played" />
         <item
             android:id="@+id/menu_add_ext"
             android:title="🧩 Add Extension" />
