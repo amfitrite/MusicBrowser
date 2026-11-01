@@ -254,21 +254,8 @@
 
     browser.runtime.sendMessage({ action: "request_config" }).catch(() => {});
 
-    // Uncapped High-Precision Web Engine FPS Counter
-    let webFrames = 0;
-    let lastWebFpsTime = performance.now();
-    function measureWebFps() {
-        webFrames++;
-        const now = performance.now();
-        if (now - lastWebFpsTime >= 1000) {
-            const rawFps = Math.round((webFrames * 1000) / (now - lastWebFpsTime));
-            browser.runtime.sendMessage({ action: "report_web_fps", fps: rawFps }).catch(() => {});
-            webFrames = 0;
-            lastWebFpsTime = now;
-        }
-        requestAnimationFrame(measureWebFps);
-    }
-    requestAnimationFrame(measureWebFps);
+    // Avoid a permanent requestAnimationFrame loop on every page. It only
+    // counted display-synchronized callbacks and added work without improving rendering.
 
     setInterval(monitor, 1000);
     monitor();
