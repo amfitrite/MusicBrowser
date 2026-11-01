@@ -2,10 +2,15 @@ package com.example.musicbrowser
 
 import android.app.AlertDialog
 import android.content.Context
+import android.content.res.Configuration
+import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.view.Choreographer
+import android.view.Display
 import android.view.KeyEvent
+import android.view.SurfaceView
 import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
@@ -13,7 +18,7 @@ import android.widget.ImageButton
 import android.widget.PopupMenu
 import android.widget.TextView
 import android.widget.Toast
-import android.view.Choreographer
+import kotlin.math.roundToInt
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import android.content.Intent
@@ -49,30 +54,61 @@ class MainActivity : AppCompatActivity() {
     private var autoHideToolbar: Boolean = true
     private var toolbarSensitivity: String = "FAST"
     private var toolbarPosition: String = "BOTTOM"
+    private var instantTapEnabled: Boolean = true
 
-    // FPS Meter variables
+    // FPS meter + display performance variables
     private lateinit var fpsMeterText: TextView
     private var isFpsMeterEnabled = true
+    private var isVsyncEnabled = false
+    private var performanceModeEnabled = true
+    private var maxSupportedRefreshRate = 60f
+    private var displayRefreshRate = 60f
+    private var targetRefreshRate = 60f
     private var frameCount = 0
-    private var lastFpsTime = 0L
+    private var jankFrameCount = 0
+    private var fpsWindowStartNanos = 0L
+    private var lastFrameTimeNanos = 0L
     private val frameCallback = object : Choreographer.FrameCallback {
         override fun doFrame(frameTimeNanos: Long) {
             if (!isFpsMeterEnabled) return
 
+            if (fpsWindowStartNanos == 0L) {
+                fpsWindowStartNanos = frameTimeNanos
+                lastFrameTimeNanos = frameTimeNanos
+            } else {
+                val frameIntervalNanos = 1_000_000_000.0 / displayRefreshRate.coerceAtLeast(1f)
+                if (frameTimeNanos - lastFrameTimeNanos > frameIntervalNanos * 1.5) {
+                    jankFrameCount++
+                }
+                lastFrameTimeNanos = frameTimeNanos
+            }
             frameCount++
-            val currentTime = System.currentTimeMillis()
-            if (currentTime - lastFpsTime >= 1000) {
-                val fps = frameCount
-                fpsMeterText.text = "FPS: $fps"
 
-                when {
-                    fps >= 55 -> fpsMeterText.setTextColor(android.graphics.Color.GREEN)
-                    fps >= 30 -> fpsMeterText.setTextColor(android.graphics.Color.YELLOW)
-                    else -> fpsMeterText.setTextColor(android.graphics.Color.RED)
+            val elapsedNanos = frameTimeNanos - fpsWindowStartNanos
+            if (elapsedNanos >= 1_000_000_000L) {
+                val fps = (frameCount * 1_000_000_000.0 / elapsedNanos).roundToInt()
+                val webFps = BrowserBridge.currentWebFps
+                val displayFps = Math.max(fps, webFps)
+
+                if (!isVsyncEnabled) {
+                    fpsMeterText.text = "FPS: $displayFps / ∞ (Uncapped) | Jank: $jankFrameCount"
+                    fpsMeterText.setTextColor(Color.GREEN)
+                } else {
+                    val targetFps = targetRefreshRate.roundToInt().coerceAtLeast(1)
+                    fpsMeterText.text = getString(R.string.fps_meter_format, fps, targetFps, jankFrameCount)
+
+                    val ratio = fps.toFloat() / targetFps
+                    when {
+                        ratio >= 0.9f -> fpsMeterText.setTextColor(Color.GREEN)
+                        ratio >= 0.5f -> fpsMeterText.setTextColor(Color.YELLOW)
+                        else -> fpsMeterText.setTextColor(Color.RED)
+                    }
                 }
 
                 frameCount = 0
-                lastFpsTime = currentTime
+                jankFrameCount = 0
+                fpsWindowStartNanos = frameTimeNanos
+                displayRefreshRate = currentRefreshRate()
             }
             Choreographer.getInstance().postFrameCallback(this)
         }
@@ -97,8 +133,11 @@ class MainActivity : AppCompatActivity() {
 
         val initPrefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         isFpsMeterEnabled = initPrefs.getBoolean("FPS_METER_ENABLED", true)
+        isVsyncEnabled = initPrefs.getBoolean("VSYNC_ENABLED", false)
+        performanceModeEnabled = initPrefs.getBoolean("PERFORMANCE_MODE_ENABLED", true)
+        instantTapEnabled = initPrefs.getBoolean("INSTANT_TAP_ENABLED", true)
+        applyDisplayPerformance()
         updateFpsMeterVisibility()
-        unlockMaxRefreshRate()
 
         bgPlayEnabled = initPrefs.getBoolean("BACKGROUND_PLAY_ENABLED", true)
         autoHideToolbar = initPrefs.getBoolean("AUTO_HIDE_TOOLBAR", true)
@@ -108,13 +147,22 @@ class MainActivity : AppCompatActivity() {
         if (BrowserSessionStore.runtime == null) {
             val runtimeSettings = org.mozilla.geckoview.GeckoRuntimeSettings.Builder()
                 .allowInsecureConnections(org.mozilla.geckoview.GeckoRuntimeSettings.ALLOW_ALL)
+                .consoleOutput(false)
+                .doubleTapZoomingEnabled(false)
+                .inputAutoZoomEnabled(false)
                 .build()
             BrowserSessionStore.runtime = org.mozilla.geckoview.GeckoRuntime.create(applicationContext, runtimeSettings)
         }
         geckoRuntime = BrowserSessionStore.runtime!!
+        geckoRuntime.settings.setDoubleTapZoomingEnabled(false)
+        geckoRuntime.settings.setInputAutoZoomEnabled(false)
 
+        // Keep pages on the lighter mobile viewport/user-agent path. Desktop
+        // layout on a phone means more pixels, more layout work and lower FPS.
         val sessionSettings = org.mozilla.geckoview.GeckoSessionSettings.Builder()
             .suspendMediaWhenInactive(!bgPlayEnabled)
+            .userAgentMode(org.mozilla.geckoview.GeckoSessionSettings.USER_AGENT_MODE_MOBILE)
+            .viewportMode(org.mozilla.geckoview.GeckoSessionSettings.VIEWPORT_MODE_MOBILE)
             .build()
         if (BrowserSessionStore.session == null) {
             BrowserSessionStore.session = GeckoSession(sessionSettings)
@@ -239,8 +287,10 @@ class MainActivity : AppCompatActivity() {
                     return
                 }
 
-                val hideThreshold = if (toolbarSensitivity == "SLOW") 30 else 2
-                val showThreshold = if (toolbarSensitivity == "SLOW") -20 else -2
+                // A small dead zone prevents the toolbar from disappearing
+                // while the finger is still settling on a button.
+                val hideThreshold = if (toolbarSensitivity == "SLOW") 30 else 10
+                val showThreshold = if (toolbarSensitivity == "SLOW") -20 else -6
 
                 val dy = scrollY - lastScrollY
                 if (dy > hideThreshold && scrollY > 10 && !isTopBarHidden) {
@@ -341,10 +391,13 @@ class MainActivity : AppCompatActivity() {
         updateMenuTriggerMode()
         applyToolbarPosition()
 
-        // UI Logic: Collapse menu when touching the GeckoView
-        geckoView.setOnTouchListener { _, _ ->
-            if (menuContainer.visibility == View.VISIBLE) {
-                closeMenu()
+        // Keep gesture tracking on the browser surface only. Running it from
+        // Activity.dispatchTouchEvent added work to every tap, including taps
+        // on the URL bar and toolbar. Returning false lets GeckoView handle
+        // the tap immediately.
+        geckoView.setOnTouchListener { _, event ->
+            if (autoHideToolbar && ::gestureDetector.isInitialized) {
+                gestureDetector.onTouchEvent(event)
             }
             false
         }
@@ -354,7 +407,6 @@ class MainActivity : AppCompatActivity() {
                 (event != null && event.keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN)
             ) {
                 loadUrl(urlEditText.text.toString())
-                closeMenu()
                 true
             } else {
                 false
@@ -443,33 +495,113 @@ class MainActivity : AppCompatActivity() {
         Choreographer.getInstance().removeFrameCallback(frameCallback)
         if (isFpsMeterEnabled) {
             fpsMeterText.visibility = View.VISIBLE
-            lastFpsTime = System.currentTimeMillis()
-            frameCount = 0
+            resetFpsWindow()
             Choreographer.getInstance().postFrameCallback(frameCallback)
         } else {
             fpsMeterText.visibility = View.GONE
         }
     }
 
-    private fun unlockMaxRefreshRate() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            try {
-                val display = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    display
-                } else {
-                    @Suppress("DEPRECATION")
-                    window.windowManager.defaultDisplay
-                }
-                val modes = display?.supportedModes
-                val maxMode = modes?.maxByOrNull { it.refreshRate }
-                if (maxMode != null) {
-                    val params = window.attributes
-                    params.preferredDisplayModeId = maxMode.modeId
-                    window.attributes = params
-                }
-            } catch (e: Exception) {
-                android.util.Log.e("FPSUnlock", "Could not unlock max refresh rate", e)
+    private fun resetFpsWindow() {
+        frameCount = 0
+        jankFrameCount = 0
+        fpsWindowStartNanos = 0L
+        lastFrameTimeNanos = 0L
+        displayRefreshRate = currentRefreshRate()
+        targetRefreshRate = if (performanceModeEnabled) {
+            maxSupportedRefreshRate.coerceAtLeast(displayRefreshRate)
+        } else {
+            displayRefreshRate
+        }
+    }
+
+    private fun currentRefreshRate(): Float {
+        return try {
+            val currentDisplay = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                display
+            } else {
+                @Suppress("DEPRECATION")
+                window.windowManager.defaultDisplay
             }
+            currentDisplay?.refreshRate?.takeIf { it > 0f }
+                ?: displayRefreshRate.coerceAtLeast(60f)
+        } catch (e: Exception) {
+            displayRefreshRate.coerceAtLeast(60f)
+        }
+    }
+
+    /**
+     * Requests the fastest display mode the panel actually supports.
+     *
+     * A 60 Hz panel is a physical limit: Android cannot present more than 60
+     * unique frames per second on it. On 90/120/144 Hz panels this removes the
+     * per-app 60 Hz cap so the browser can use the faster panel instead.
+     */
+    private fun applyDisplayPerformance() {
+        try {
+            val currentDisplay = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                display
+            } else {
+                @Suppress("DEPRECATION")
+                window.windowManager.defaultDisplay
+            }
+            val modes = currentDisplay?.supportedModes
+            if (modes.isNullOrEmpty()) return
+
+            maxSupportedRefreshRate = modes.maxOf { it.refreshRate }
+            val params = window.attributes
+
+            if (performanceModeEnabled) {
+                // Highest refresh rate first, then highest resolution among
+                // modes that share that refresh rate.
+                val bestMode = modes
+                    .filter { it.refreshRate > 0f }
+                    .maxWithOrNull(
+                        compareBy<Display.Mode> { it.refreshRate }
+                            .thenBy { it.physicalWidth.toLong() * it.physicalHeight }
+                    )
+                if (bestMode != null) {
+                    params.preferredDisplayModeId = bestMode.modeId
+                    params.preferredRefreshRate = bestMode.refreshRate
+                }
+            } else {
+                params.preferredDisplayModeId = 0
+                params.preferredRefreshRate = 0f
+            }
+            window.attributes = params
+
+            // Android 15+: keep the panel at its fastest rate while the user
+            // is touching or scrolling instead of dropping to a power-saving rate.
+            // Performance mode also opts out of adaptive-refresh-rate power
+            // saving so the panel is not silently pushed back to 60 Hz.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+                window.setFrameRateBoostOnTouchEnabled(performanceModeEnabled)
+                window.setFrameRatePowerSavingsBalanced(!performanceModeEnabled)
+
+                // Android 15's adaptive refresh rate is vote-based. Ask the
+                // browser view (and its SurfaceView) for the fastest rate too,
+                // otherwise the default "normal" vote can pin it near 60 Hz.
+                val requestedFrameRate = if (performanceModeEnabled) {
+                    maxSupportedRefreshRate
+                } else {
+                    View.REQUESTED_FRAME_RATE_CATEGORY_DEFAULT
+                }
+                geckoView.requestedFrameRate = requestedFrameRate
+                (geckoView.getChildAt(0) as? SurfaceView)?.requestedFrameRate = requestedFrameRate
+            }
+
+            displayRefreshRate = currentRefreshRate()
+            targetRefreshRate = if (performanceModeEnabled) {
+                maxSupportedRefreshRate.coerceAtLeast(displayRefreshRate)
+            } else {
+                displayRefreshRate
+            }
+            android.util.Log.d(
+                "DisplayPerf",
+                "performanceMode=$performanceModeEnabled max=${maxSupportedRefreshRate}Hz current=${displayRefreshRate}Hz"
+            )
+        } catch (e: Exception) {
+            android.util.Log.e("DisplayPerf", "Could not apply display performance mode", e)
         }
     }
 
@@ -514,9 +646,6 @@ class MainActivity : AppCompatActivity() {
         showTopBar()
     }
 
-    private fun closeMenu() {
-    }
-
     private fun updateMenuTriggerMode() {
         menuContainer.visibility = View.VISIBLE
     }
@@ -548,13 +677,6 @@ class MainActivity : AppCompatActivity() {
                 return false
             }
         })
-    }
-
-    override fun dispatchTouchEvent(ev: android.view.MotionEvent?): Boolean {
-        if (ev != null && ::gestureDetector.isInitialized) {
-            gestureDetector.onTouchEvent(ev)
-        }
-        return super.dispatchTouchEvent(ev)
     }
 
     private fun loadUrl(input: String) {
@@ -685,6 +807,34 @@ class MainActivity : AppCompatActivity() {
             setSelection(if (currentSens == "FAST") 0 else 1)
         }
 
+        // --- Performance Mode / Max Refresh Rate Selection ---
+        val performanceLabel = android.widget.TextView(this).apply {
+            text = "Performance Mode (Max Refresh Rate)"
+            textSize = 14f
+            setTextColor(android.graphics.Color.GRAY)
+            setPadding(0, 32, 0, 8)
+        }
+        val performanceSpinner = android.widget.Spinner(this).apply {
+            val performanceOptions = arrayOf("Enabled (Default)", "Disabled")
+            adapter = android.widget.ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, performanceOptions)
+            val currentPerformance = prefs.getBoolean("PERFORMANCE_MODE_ENABLED", true)
+            setSelection(if (currentPerformance) 0 else 1)
+        }
+
+        // --- Instant Tap Selection ---
+        val instantTapLabel = android.widget.TextView(this).apply {
+            text = "Instant Tap (Disable Double-Tap Zoom)"
+            textSize = 14f
+            setTextColor(android.graphics.Color.GRAY)
+            setPadding(0, 32, 0, 8)
+        }
+        val instantTapSpinner = android.widget.Spinner(this).apply {
+            val instantTapOptions = arrayOf("Enabled (Default)", "Disabled")
+            adapter = android.widget.ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, instantTapOptions)
+            val currentInstantTap = prefs.getBoolean("INSTANT_TAP_ENABLED", true)
+            setSelection(if (currentInstantTap) 0 else 1)
+        }
+
         // --- FPS Meter Selection ---
         val fpsLabel = android.widget.TextView(this).apply {
             text = "Show FPS Meter"
@@ -697,6 +847,20 @@ class MainActivity : AppCompatActivity() {
             adapter = android.widget.ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, fpsOptions)
             val currentFps = prefs.getBoolean("FPS_METER_ENABLED", true)
             setSelection(if (currentFps) 0 else 1)
+        }
+
+        // --- VSYNC Status Selection ---
+        val vsyncLabel = android.widget.TextView(this).apply {
+            text = "VSYNC Status"
+            textSize = 14f
+            setTextColor(android.graphics.Color.GRAY)
+            setPadding(0, 32, 0, 8)
+        }
+        val vsyncSpinner = android.widget.Spinner(this).apply {
+            val vsyncOptions = arrayOf("Disabled (Default / Max Benchmark)", "Enabled (VSYNC Sync)")
+            adapter = android.widget.ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, vsyncOptions)
+            val currentVsync = prefs.getBoolean("VSYNC_ENABLED", false)
+            setSelection(if (!currentVsync) 0 else 1)
         }
 
         settingsLayout.addView(searchLabel)
@@ -713,12 +877,23 @@ class MainActivity : AppCompatActivity() {
         settingsLayout.addView(sensitivitySpinner)
         settingsLayout.addView(posLabel)
         settingsLayout.addView(posSpinner)
+        settingsLayout.addView(performanceLabel)
+        settingsLayout.addView(performanceSpinner)
+        settingsLayout.addView(instantTapLabel)
+        settingsLayout.addView(instantTapSpinner)
         settingsLayout.addView(fpsLabel)
         settingsLayout.addView(fpsSpinner)
+        settingsLayout.addView(vsyncLabel)
+        settingsLayout.addView(vsyncSpinner)
+
+        // Keep every option reachable on short screens now that the list is longer.
+        val settingsScroll = android.widget.ScrollView(this).apply {
+            addView(settingsLayout)
+        }
 
         AlertDialog.Builder(this)
             .setTitle("Browser Settings")
-            .setView(settingsLayout)
+            .setView(settingsScroll)
             .setPositiveButton("Save") { dialog, _ ->
                 val engineValues = arrayOf("google", "duckduckgo", "bing")
                 val timeValues = arrayOf(0, 5, 10, 15, 20, 25, 30)
@@ -730,6 +905,9 @@ class MainActivity : AppCompatActivity() {
                 val selectedPos = posValues[posSpinner.selectedItemPosition]
                 val selectedSens = sensitivityValues[sensitivitySpinner.selectedItemPosition]
                 val fpsEnabled = fpsSpinner.selectedItemPosition == 0
+                val performanceEnabled = performanceSpinner.selectedItemPosition == 0
+                val instantTap = instantTapSpinner.selectedItemPosition == 0
+                val vsyncEnabled = vsyncSpinner.selectedItemPosition == 1
 
                 prefs.edit()
                     .putString("SEARCH_ENGINE", engineValues[searchSpinner.selectedItemPosition])
@@ -739,7 +917,10 @@ class MainActivity : AppCompatActivity() {
                     .putBoolean("AUTO_HIDE_TOOLBAR", autoHideEnabled)
                     .putString("TOOLBAR_POSITION", selectedPos)
                     .putString("TOOLBAR_SENSITIVITY", selectedSens)
+                    .putBoolean("PERFORMANCE_MODE_ENABLED", performanceEnabled)
+                    .putBoolean("INSTANT_TAP_ENABLED", instantTap)
                     .putBoolean("FPS_METER_ENABLED", fpsEnabled)
+                    .putBoolean("VSYNC_ENABLED", vsyncEnabled)
                     .apply()
                     
                 bgPlayEnabled = bgEnabled
@@ -747,6 +928,11 @@ class MainActivity : AppCompatActivity() {
                 toolbarSensitivity = selectedSens
                 toolbarPosition = selectedPos ?: "BOTTOM"
                 isFpsMeterEnabled = fpsEnabled
+                isVsyncEnabled = vsyncEnabled
+                performanceModeEnabled = performanceEnabled
+                instantTapEnabled = instantTap
+                geckoRuntime.settings.setDoubleTapZoomingEnabled(!instantTap)
+                applyDisplayPerformance()
                 updateFpsMeterVisibility()
 
                 geckoSession.settings.setSuspendMediaWhenInactive(!bgEnabled)
@@ -1163,6 +1349,11 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        applyDisplayPerformance()
+    }
+
     override fun onPause() {
         Choreographer.getInstance().removeFrameCallback(frameCallback)
         if (bgPlayEnabled) {
@@ -1180,9 +1371,9 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        applyDisplayPerformance()
         if (isFpsMeterEnabled) {
-            lastFpsTime = System.currentTimeMillis()
-            frameCount = 0
+            resetFpsWindow()
             Choreographer.getInstance().removeFrameCallback(frameCallback)
             Choreographer.getInstance().postFrameCallback(frameCallback)
         }
@@ -1190,6 +1381,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        Choreographer.getInstance().removeFrameCallback(frameCallback)
         // BrowserSessionStore owns the session so playback can continue in the background.
         super.onDestroy()
     }

@@ -18,6 +18,8 @@ object BrowserBridge {
     @Volatile private var nativePort: WebExtension.Port? = null
     @Volatile var currentTrack: MusicTrack? = null
         private set
+    @Volatile var currentWebFps: Int = 0
+        private set
     @Volatile private var lastHistoryKey: String = ""
     @Volatile private var installStarted = false
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -50,6 +52,9 @@ object BrowserBridge {
                                 when (json.optString("action")) {
                                     "request_config" -> sendConfig(app)
                                     "trigger_media_next" -> dispatchAndroidMediaNext()
+                                    "report_web_fps" -> {
+                                        currentWebFps = json.optInt("fps", 0)
+                                    }
                                 }
                                 if (json.optString("type") == "MEDIA_STATE") {
                                     receiveMediaState(app, json)
