@@ -250,6 +250,7 @@
     const pageHintNodes = new Map();
     const mediaOriginalPreload = new Map();
     const mediaPrefetchers = [];
+    const prefetchedMediaTargets = new Set();
     let observedLinks = new WeakSet();
     let observedMedia = new WeakSet();
 
@@ -346,9 +347,22 @@
         }
     }
 
+    function isDirectMediaUrl(url) {
+        return /\.(?:mp4|m4v|webm|mov|m3u8|mpd)(?:$|[?#])/i.test(url);
+    }
+
     function prefetchDirectMediaLink(url) {
-        if (mediaPrefetchers.length >= 2 || !prefetchNetworkAllowed()) return;
-        if (!/\.(?:mp4|m4v|webm|mov|m3u8|mpd)(?:$|[?#])/i.test(url)) return;
+        if (prefetchedMediaTargets.has(url) || !prefetchNetworkAllowed()) return;
+        if (!isDirectMediaUrl(url) || mediaPrefetchers.length >= 2) return;
+        prefetchedMediaTargets.add(url);
+
+        // HLS/DASH manifests are small hints only. Their media segments and
+        // DRM/license requests are controlled by the site's playback engine.
+        if (/\.(?:m3u8|mpd)(?:$|[?#])/i.test(url)) {
+            appendPrefetchHint(url);
+            return;
+        }
+
         try {
             const media = document.createElement("video");
             media.preload = "metadata";
@@ -360,7 +374,7 @@
         } catch (_) {}
     }
 
-    function eligiblePageLink(link) {
+    function eligiblePreloadLink(link) {
         if (!link || link.hasAttribute("download")) return null;
         if ((link.getAttribute("rel") || "").toLowerCase().split(/\s+/).includes("nofollow")) return null;
         const url = normalizePrefetchUrl(link.href);
@@ -368,9 +382,14 @@
         return url;
     }
 
+    function preloadLinkTarget(url) {
+        if (isDirectMediaUrl(url)) prefetchDirectMediaLink(url);
+        else prefetchPage(url);
+    }
+
     function observePageLink(link) {
         if (!quicklinkEnabled || observedLinks.has(link) || !pageObserver) return;
-        const url = eligiblePageLink(link);
+        const url = eligiblePreloadLink(link);
         if (!url) return;
         observedLinks.add(link);
         pageObserver.observe(link);
@@ -405,9 +424,8 @@
             event.target.closest("a[href], video, audio") : null;
         if (!target) return;
         if (target.tagName === "A") {
-            const url = eligiblePageLink(target);
-            if (url) prefetchPage(url);
-            prefetchDirectMediaLink(target.href);
+            const url = eligiblePreloadLink(target);
+            if (url) preloadLinkTarget(url);
         } else {
             warmMediaElement(target, true);
         }
@@ -437,6 +455,7 @@
             try { media.pause(); media.removeAttribute("src"); media.load(); } catch (_) {}
         });
         mediaPrefetchers.length = 0;
+        prefetchedMediaTargets.clear();
         pagePrefetchCount = 0;
         mediaAutoPreloadCount = 0;
         prefetchedPages.clear();
@@ -452,8 +471,8 @@
             entries.forEach(entry => {
                 if (!entry.isIntersecting) return;
                 const link = entry.target;
-                const url = eligiblePageLink(link);
-                if (url) prefetchPage(url);
+                const url = eligiblePreloadLink(link);
+                if (url) preloadLinkTarget(url);
                 pageObserver.unobserve(link);
             });
         }, { rootMargin: "250px 0px" });
