@@ -56,6 +56,13 @@ class MainActivity : AppCompatActivity() {
     private var toolbarPosition: String = "BOTTOM"
     private var instantTapEnabled: Boolean = true
 
+    // Cached primitives for high-frequency events
+    private var isToolbarPositionTop: Boolean = false
+    private var hideThreshold: Int = 10
+    private var showThreshold: Int = -6
+    private var flingMinDiffY: Int = 25
+    private var flingMinVelocity: Int = 30
+
     // FPS meter + display performance variables
     private lateinit var fpsMeterText: TextView
     private var isFpsMeterEnabled = true
@@ -144,12 +151,24 @@ class MainActivity : AppCompatActivity() {
         toolbarSensitivity = initPrefs.getString("TOOLBAR_SENSITIVITY", "FAST") ?: "FAST"
         toolbarPosition = initPrefs.getString("TOOLBAR_POSITION", "BOTTOM") ?: "BOTTOM"
 
+        isToolbarPositionTop = (toolbarPosition == "TOP")
+        hideThreshold = if (toolbarSensitivity == "SLOW") 30 else 10
+        showThreshold = if (toolbarSensitivity == "SLOW") -20 else -6
+        flingMinDiffY = if (toolbarSensitivity == "SLOW") 100 else 25
+        flingMinVelocity = if (toolbarSensitivity == "SLOW") 150 else 30
+
         if (BrowserSessionStore.runtime == null) {
+            val geckoConfigFile = File(filesDir, "geckoview-config.yaml")
+            if (!geckoConfigFile.exists()) {
+                geckoConfigFile.writeText("layout.frame_rate: 999\n")
+            }
+
             val runtimeSettings = org.mozilla.geckoview.GeckoRuntimeSettings.Builder()
                 .allowInsecureConnections(org.mozilla.geckoview.GeckoRuntimeSettings.ALLOW_ALL)
                 .consoleOutput(false)
                 .doubleTapZoomingEnabled(false)
                 .inputAutoZoomEnabled(false)
+                .configFilePath(geckoConfigFile.absolutePath)
                 .build()
             BrowserSessionStore.runtime = org.mozilla.geckoview.GeckoRuntime.create(applicationContext, runtimeSettings)
         }
@@ -286,11 +305,6 @@ class MainActivity : AppCompatActivity() {
                     }
                     return
                 }
-
-                // A small dead zone prevents the toolbar from disappearing
-                // while the finger is still settling on a button.
-                val hideThreshold = if (toolbarSensitivity == "SLOW") 30 else 10
-                val showThreshold = if (toolbarSensitivity == "SLOW") -20 else -6
 
                 val dy = scrollY - lastScrollY
                 if (dy > hideThreshold && scrollY > 10 && !isTopBarHidden) {
@@ -607,7 +621,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun applyToolbarPosition() {
         val layoutParams = menuContainer.layoutParams as androidx.constraintlayout.widget.ConstraintLayout.LayoutParams
-        if (toolbarPosition == "TOP") {
+        if (isToolbarPositionTop) {
             layoutParams.topToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
             layoutParams.bottomToBottom = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET
             layoutParams.topMargin = 12.dpToPx()
@@ -626,7 +640,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun hideTopBar() {
-        val targetY = if (toolbarPosition == "TOP") -menuContainer.height.toFloat() - 200f else menuContainer.height.toFloat() + 200f
+        val targetY = if (isToolbarPositionTop) -menuContainer.height.toFloat() - 200f else menuContainer.height.toFloat() + 200f
 
         menuContainer.animate()
             .translationY(targetY)
@@ -662,13 +676,10 @@ class MainActivity : AppCompatActivity() {
                             return true
                         }
                     } else {
-                        val minDiffY = if (toolbarSensitivity == "SLOW") 100 else 25
-                        val minVelocity = if (toolbarSensitivity == "SLOW") 150 else 30
-
-                        if (diffY < -minDiffY && Math.abs(velocityY) > minVelocity) {
+                        if (diffY < -flingMinDiffY && Math.abs(velocityY) > flingMinVelocity) {
                             hideTopBar()
                             return true
-                        } else if (diffY > minDiffY && Math.abs(velocityY) > minVelocity) {
+                        } else if (diffY > flingMinDiffY && Math.abs(velocityY) > flingMinVelocity) {
                             showTopBar()
                             return true
                         }
@@ -931,6 +942,13 @@ class MainActivity : AppCompatActivity() {
                 isVsyncEnabled = vsyncEnabled
                 performanceModeEnabled = performanceEnabled
                 instantTapEnabled = instantTap
+
+                isToolbarPositionTop = (toolbarPosition == "TOP")
+                hideThreshold = if (toolbarSensitivity == "SLOW") 30 else 10
+                showThreshold = if (toolbarSensitivity == "SLOW") -20 else -6
+                flingMinDiffY = if (toolbarSensitivity == "SLOW") 100 else 25
+                flingMinVelocity = if (toolbarSensitivity == "SLOW") 150 else 30
+
                 geckoRuntime.settings.setDoubleTapZoomingEnabled(!instantTap)
                 applyDisplayPerformance()
                 updateFpsMeterVisibility()
