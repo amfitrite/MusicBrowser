@@ -10,6 +10,8 @@ import android.os.Bundle
 import android.view.Choreographer
 import android.view.Display
 import android.view.KeyEvent
+import android.view.Surface
+import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
 import android.view.inputmethod.EditorInfo
@@ -145,11 +147,16 @@ class MainActivity : AppCompatActivity() {
         toolbarPosition = initPrefs.getString("TOOLBAR_POSITION", "BOTTOM") ?: "BOTTOM"
 
         if (BrowserSessionStore.runtime == null) {
+            val configFile = File(filesDir, "gecko_config.yaml")
+            val configContent = "prefs:\n  layout.frame_rate: 0\n"
+            FileOutputStream(configFile).use { it.write(configContent.toByteArray()) }
+
             val runtimeSettings = org.mozilla.geckoview.GeckoRuntimeSettings.Builder()
                 .allowInsecureConnections(org.mozilla.geckoview.GeckoRuntimeSettings.ALLOW_ALL)
                 .consoleOutput(false)
                 .doubleTapZoomingEnabled(false)
                 .inputAutoZoomEnabled(false)
+                .configFilePath(configFile.absolutePath)
                 .build()
             BrowserSessionStore.runtime = org.mozilla.geckoview.GeckoRuntime.create(applicationContext, runtimeSettings)
         }
@@ -263,6 +270,12 @@ class MainActivity : AppCompatActivity() {
                 hasUserGesture: Boolean
             ) {
                 currentUrl = url ?: ""
+                if (currentUrl.isNotBlank() && !currentUrl.startsWith("about:")) {
+                    getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                        .edit()
+                        .putString("LAST_VISITED_URL", currentUrl)
+                        .apply()
+                }
             }
 
             override fun onNewSession(
@@ -381,9 +394,12 @@ class MainActivity : AppCompatActivity() {
         // Install shared Media Bridge
         BrowserBridge.install(applicationContext, geckoRuntime)
 
-        // Load YouTube by default if session is fresh
+        // Load last visited page if "Start Where You Left Off" is enabled, else YouTube
         if (currentUrl.isEmpty()) {
-            geckoSession.loadUri("https://m.youtube.com")
+            val startWhereLeftOff = initPrefs.getBoolean("START_WHERE_LEFT_OFF", true)
+            val lastUrl = initPrefs.getString("LAST_VISITED_URL", "") ?: ""
+            val initialUrl = if (startWhereLeftOff && lastUrl.isNotBlank()) lastUrl else "https://m.youtube.com"
+            geckoSession.loadUri(initialUrl)
         }
 
         // Setup Gesture, Menu Mode, and Navbar Position
@@ -588,6 +604,27 @@ class MainActivity : AppCompatActivity() {
                 }
                 geckoView.requestedFrameRate = requestedFrameRate
                 (geckoView.getChildAt(0) as? SurfaceView)?.requestedFrameRate = requestedFrameRate
+            }
+
+            // Android 11+ (API 30+): Explicitly request 120 FPS on SurfaceFlinger compositor
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val surfaceView = geckoView.getChildAt(0) as? SurfaceView
+                if (surfaceView != null) {
+                    val rate = if (performanceModeEnabled) maxSupportedRefreshRate.coerceAtLeast(120f) else 0f
+                    val compatibility = Surface.FRAME_RATE_COMPATIBILITY_DEFAULT
+
+                    surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
+                        override fun surfaceCreated(holder: SurfaceHolder) {
+                            try { holder.surface?.setFrameRate(rate, compatibility) } catch (_: Exception) {}
+                        }
+                        override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                            try { holder.surface?.setFrameRate(rate, compatibility) } catch (_: Exception) {}
+                        }
+                        override fun surfaceDestroyed(holder: SurfaceHolder) {}
+                    })
+
+                    try { surfaceView.holder.surface?.setFrameRate(rate, compatibility) } catch (_: Exception) {}
+                }
             }
 
             displayRefreshRate = currentRefreshRate()
@@ -863,6 +900,34 @@ class MainActivity : AppCompatActivity() {
             setSelection(if (!currentVsync) 0 else 1)
         }
 
+        // --- Google Quicklink Selection ---
+        val quicklinkLabel = android.widget.TextView(this).apply {
+            text = "Google Quicklink (Instant Page Prefetch)"
+            textSize = 14f
+            setTextColor(android.graphics.Color.GRAY)
+            setPadding(0, 32, 0, 8)
+        }
+        val quicklinkSpinner = android.widget.Spinner(this).apply {
+            val quicklinkOptions = arrayOf("Enabled (Default / Instant Load)", "Disabled")
+            adapter = android.widget.ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, quicklinkOptions)
+            val currentQuicklink = prefs.getBoolean("QUICKLINK_ENABLED", true)
+            setSelection(if (currentQuicklink) 0 else 1)
+        }
+
+        // --- Start Where You Left Off Selection ---
+        val leftOffLabel = android.widget.TextView(this).apply {
+            text = "Start Where You Left Off"
+            textSize = 14f
+            setTextColor(android.graphics.Color.GRAY)
+            setPadding(0, 32, 0, 8)
+        }
+        val leftOffSpinner = android.widget.Spinner(this).apply {
+            val leftOffOptions = arrayOf("Enabled (Default / Reopen Last Page)", "Disabled (Always Open YouTube)")
+            adapter = android.widget.ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, leftOffOptions)
+            val currentLeftOff = prefs.getBoolean("START_WHERE_LEFT_OFF", true)
+            setSelection(if (currentLeftOff) 0 else 1)
+        }
+
         settingsLayout.addView(searchLabel)
         settingsLayout.addView(searchSpinner)
         settingsLayout.addView(outroLabel)
@@ -885,6 +950,10 @@ class MainActivity : AppCompatActivity() {
         settingsLayout.addView(fpsSpinner)
         settingsLayout.addView(vsyncLabel)
         settingsLayout.addView(vsyncSpinner)
+        settingsLayout.addView(quicklinkLabel)
+        settingsLayout.addView(quicklinkSpinner)
+        settingsLayout.addView(leftOffLabel)
+        settingsLayout.addView(leftOffSpinner)
 
         // Keep every option reachable on short screens now that the list is longer.
         val settingsScroll = android.widget.ScrollView(this).apply {
@@ -908,6 +977,8 @@ class MainActivity : AppCompatActivity() {
                 val performanceEnabled = performanceSpinner.selectedItemPosition == 0
                 val instantTap = instantTapSpinner.selectedItemPosition == 0
                 val vsyncEnabled = vsyncSpinner.selectedItemPosition == 1
+                val quicklinkEnabled = quicklinkSpinner.selectedItemPosition == 0
+                val leftOffEnabled = leftOffSpinner.selectedItemPosition == 0
 
                 prefs.edit()
                     .putString("SEARCH_ENGINE", engineValues[searchSpinner.selectedItemPosition])
@@ -921,6 +992,8 @@ class MainActivity : AppCompatActivity() {
                     .putBoolean("INSTANT_TAP_ENABLED", instantTap)
                     .putBoolean("FPS_METER_ENABLED", fpsEnabled)
                     .putBoolean("VSYNC_ENABLED", vsyncEnabled)
+                    .putBoolean("QUICKLINK_ENABLED", quicklinkEnabled)
+                    .putBoolean("START_WHERE_LEFT_OFF", leftOffEnabled)
                     .apply()
                     
                 bgPlayEnabled = bgEnabled

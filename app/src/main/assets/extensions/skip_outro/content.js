@@ -81,20 +81,33 @@
         return activeMedia;
     }
 
+    let lastSkipAttemptAt = 0;
+
     function findButton(kind) {
         const next = [
-            "[data-testid='control-button-skip-forward']", "[data-testid='next-button']",
-            ".skipControl__next", ".ytp-next-button", "ytmusic-player-bar .next-button",
-            "button[aria-label*='Next' i]", "button[title*='Next' i]"
+            "[data-testid='control-button-skip-forward']",
+            "[data-testid='next-button']",
+            "button[data-testid*='skip-forward']",
+            ".skipControl__next", ".playControls__next", ".ytp-next-button",
+            "ytmusic-player-bar .next-button",
+            "ytmusic-player-bar button[aria-label*='Next' i]",
+            "button[aria-label*='Next track' i]", "button[aria-label*='Next song' i]",
+            "button[aria-label*='Next' i]", "button[title*='Next' i]",
+            "button[aria-label*='Berikutnya' i]", "button[title*='Berikutnya' i]"
         ];
         const previous = [
-            "[data-testid='control-button-skip-back']", "[data-testid='previous-button']",
-            ".skipControl__previous", ".ytp-prev-button", "ytmusic-player-bar .previous-button",
+            "[data-testid='control-button-skip-back']",
+            "[data-testid='previous-button']",
+            ".skipControl__previous", ".playControls__prev", ".ytp-prev-button",
+            "ytmusic-player-bar .previous-button",
             "button[aria-label*='Previous' i]", "button[title*='Previous' i]"
         ];
         for (const selector of kind === "next" ? next : previous) {
-            const button = document.querySelector(selector);
-            if (button && !button.disabled && button.getAttribute("aria-disabled") !== "true") return button;
+            for (const button of document.querySelectorAll(selector)) {
+                if (button && !button.disabled &&
+                    button.getAttribute("aria-disabled") !== "true" &&
+                    button.getAttribute("disabled") === null) return button;
+            }
         }
         return null;
     }
@@ -103,20 +116,26 @@
         const media = getMedia();
         if (cmd === "next" || cmd === "prev") {
             const button = findButton(cmd);
-            if (button) button.click();
-            else if (media && cmd === "prev" && media.currentTime > 3) media.currentTime = 0;
-            return;
+            if (button) {
+                button.click();
+                return true;
+            }
+            if (media && cmd === "prev" && media.currentTime > 3) {
+                media.currentTime = 0;
+                return true;
+            }
+            return false;
         }
 
         if (media) {
             if ((cmd === "play" || (cmd === "play_pause" && media.paused)) && media.paused) {
                 const promise = media.play();
                 if (promise && promise.catch) promise.catch(() => {});
-                return;
+                return true;
             }
             if ((cmd === "pause" || (cmd === "play_pause" && !media.paused)) && !media.paused) {
                 media.pause();
-                return;
+                return true;
             }
         }
 
@@ -124,7 +143,11 @@
         const button = Array.from(document.querySelectorAll("button")).find(b =>
             labels.some(label => (b.getAttribute("aria-label") || "").toLowerCase().includes(label))
         );
-        if (button) button.click();
+        if (button) {
+            button.click();
+            return true;
+        }
+        return false;
     }
 
     function report(force) {
@@ -137,7 +160,6 @@
             lastTrackKey = key;
             lastTime = media ? media.currentTime : 0;
         } else if (media && media.currentTime + 2 < lastTime) {
-            // Replaying the same source starts a new outro-skip cycle.
             lastTime = media.currentTime;
             media.__musicBrowserCycle = (media.__musicBrowserCycle || 0) + 1;
             media.__musicBrowserSkipped = "";
@@ -179,19 +201,50 @@
             const remaining = media.duration - media.currentTime;
             const cycle = media.__musicBrowserCycle || 0;
             const key = lastTrackKey + "|" + cycle;
-            if (remaining > 0 && remaining <= skipSeconds && media.__musicBrowserSkipped !== key) {
-                media.__musicBrowserSkipped = key;
-                if (skipMethod === "A") browser.runtime.sendMessage({ action: "trigger_media_next" }).catch(() => {});
-                else command("next");
+            const now = Date.now();
+            if (remaining > 0 && remaining <= skipSeconds &&
+                media.__musicBrowserSkipped !== key && now - lastSkipAttemptAt >= 2000) {
+                lastSkipAttemptAt = now;
+                if (skipMethod === "A") {
+                    browser.runtime.sendMessage({ action: "trigger_media_next" }).catch(() => {});
+                    media.__musicBrowserSkipped = key;
+                } else if (command("next")) {
+                    media.__musicBrowserSkipped = key;
+                }
             }
         }
         report(false);
     }
 
+    let resumedMediaKey = "";
+
     browser.runtime.onMessage.addListener(message => {
         if (message.type === "SET_CONFIG") {
             skipSeconds = Math.max(0, Math.min(30, Number(message.skipTime) || 0));
             skipMethod = message.skipMethod === "A" ? "A" : "B";
+
+            const targetUrl = message.resumeMediaUrl;
+            const targetTime = Number(message.resumeMediaPositionSec) || 0;
+
+            if (targetUrl && targetTime > 3 && location.href.includes(targetUrl.split('#')[0].split('?')[0])) {
+                const key = targetUrl + "|" + Math.floor(targetTime);
+                if (resumedMediaKey !== key) {
+                    resumedMediaKey = key;
+                    let attempts = 5;
+                    function attemptResume() {
+                        const media = getMedia();
+                        if (media && media.readyState >= 1) {
+                            if (Math.abs(media.currentTime - targetTime) > 3) {
+                                media.currentTime = targetTime;
+                            }
+                        } else if (attempts > 0) {
+                            attempts--;
+                            setTimeout(attemptResume, 1000);
+                        }
+                    }
+                    setTimeout(attemptResume, 1000);
+                }
+            }
         } else if (message.type === "MEDIA_CMD") {
             command(message.cmd);
             report(true);
@@ -200,7 +253,7 @@
 
     browser.runtime.sendMessage({ action: "request_config" }).catch(() => {});
 
-    // Uncapped High-Precision Web Engine FPS Counter
+    // Uncapped High-Precision Web Engine FPS Counter (Unthrottled Timer Loop)
     let webFrames = 0;
     let lastWebFpsTime = performance.now();
     function measureWebFps() {
@@ -212,9 +265,9 @@
             webFrames = 0;
             lastWebFpsTime = now;
         }
-        requestAnimationFrame(measureWebFps);
+        setTimeout(measureWebFps, 0);
     }
-    requestAnimationFrame(measureWebFps);
+    setTimeout(measureWebFps, 0);
 
     setInterval(monitor, 1000);
     monitor();

@@ -77,6 +77,9 @@ object BrowserBridge {
                 .put("type", "SET_CONFIG")
                 .put("skipTime", prefs.getInt("SKIP_OUTRO_TIME", 0))
                 .put("skipMethod", prefs.getString("SKIP_OUTRO_METHOD", "B"))
+                .put("quicklinkEnabled", prefs.getBoolean("QUICKLINK_ENABLED", true))
+                .put("resumeMediaUrl", prefs.getString("LAST_MEDIA_URL", ""))
+                .put("resumeMediaPositionSec", prefs.getLong("LAST_MEDIA_POSITION_MS", 0L) / 1000.0)
         )
     }
 
@@ -124,6 +127,16 @@ object BrowserBridge {
             isPlaying = json.optBoolean("isPlaying", false)
         )
         currentTrack = track
+
+        if (position > 3000L && track.url.isNotBlank()) {
+            val prefs = context.applicationContext.getSharedPreferences("BrowserPrefs", Context.MODE_PRIVATE)
+            if (prefs.getBoolean("START_WHERE_LEFT_OFF", true)) {
+                prefs.edit()
+                    .putString("LAST_MEDIA_URL", track.url)
+                    .putLong("LAST_MEDIA_POSITION_MS", position)
+                    .apply()
+            }
+        }
 
         if (track.isPlaying && track.stableKey() != lastHistoryKey) {
             lastHistoryKey = track.stableKey()
