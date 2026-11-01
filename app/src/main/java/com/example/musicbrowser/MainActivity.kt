@@ -145,11 +145,16 @@ class MainActivity : AppCompatActivity() {
         toolbarPosition = initPrefs.getString("TOOLBAR_POSITION", "BOTTOM") ?: "BOTTOM"
 
         if (BrowserSessionStore.runtime == null) {
+            val configFile = File(filesDir, "gecko_config.yaml")
+            val configContent = "prefs:\n  layout.frame_rate: 0\n"
+            FileOutputStream(configFile).use { it.write(configContent.toByteArray()) }
+
             val runtimeSettings = org.mozilla.geckoview.GeckoRuntimeSettings.Builder()
                 .allowInsecureConnections(org.mozilla.geckoview.GeckoRuntimeSettings.ALLOW_ALL)
                 .consoleOutput(false)
                 .doubleTapZoomingEnabled(false)
                 .inputAutoZoomEnabled(false)
+                .configFilePath(configFile.absolutePath)
                 .build()
             BrowserSessionStore.runtime = org.mozilla.geckoview.GeckoRuntime.create(applicationContext, runtimeSettings)
         }
