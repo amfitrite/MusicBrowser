@@ -68,54 +68,61 @@ class MainActivity : AppCompatActivity() {
     // FPS meter + display performance variables
     private lateinit var fpsMeterText: TextView
     private var isFpsMeterEnabled = true
-    private var isVsyncEnabled = false
     private var performanceModeEnabled = true
     private var maxSupportedRefreshRate = 60f
     private var displayRefreshRate = 60f
     private var targetRefreshRate = 60f
     private var frameCount = 0
-    private var jankFrameCount = 0
+    private var droppedFrameCount = 0
+    private var frameIntervalTotalNanos = 0L
+    private var frameIntervalSamples = 0
     private var fpsWindowStartNanos = 0L
     private var lastFrameTimeNanos = 0L
+
+    // Choreographer callbacks are synchronized to the display. This reports
+    // actual UI cadence; it must not be presented as uncapped Gecko render FPS.
     private val frameCallback = object : Choreographer.FrameCallback {
         override fun doFrame(frameTimeNanos: Long) {
             if (!isFpsMeterEnabled) return
 
             if (fpsWindowStartNanos == 0L) {
                 fpsWindowStartNanos = frameTimeNanos
-                lastFrameTimeNanos = frameTimeNanos
-            } else {
-                val frameIntervalNanos = 1_000_000_000.0 / displayRefreshRate.coerceAtLeast(1f)
-                if (frameTimeNanos - lastFrameTimeNanos > frameIntervalNanos * 1.5) {
-                    jankFrameCount++
-                }
-                lastFrameTimeNanos = frameTimeNanos
             }
-            frameCount++
+            if (lastFrameTimeNanos != 0L) {
+                val delta = frameTimeNanos - lastFrameTimeNanos
+                val expectedInterval = 1_000_000_000.0 / displayRefreshRate.coerceAtLeast(1f)
+                frameIntervalTotalNanos += delta
+                frameIntervalSamples++
+                frameCount++
+                if (delta > expectedInterval * 1.5) {
+                    droppedFrameCount += ((delta / expectedInterval).toInt() - 1).coerceAtLeast(1)
+                }
+            }
+            lastFrameTimeNanos = frameTimeNanos
 
             val elapsedNanos = frameTimeNanos - fpsWindowStartNanos
             if (elapsedNanos >= 1_000_000_000L) {
                 val fps = (frameCount * 1_000_000_000.0 / elapsedNanos).roundToInt()
-                val webFps = BrowserBridge.currentWebFps
-                val displayFps = Math.max(fps, webFps)
-
-                if (!isVsyncEnabled) {
-                    fpsMeterText.text = "FPS: $displayFps / ∞ (Uncapped) | Jank: $jankFrameCount"
-                    fpsMeterText.setTextColor(Color.GREEN)
+                val averageFrameMs = if (frameIntervalSamples > 0) {
+                    frameIntervalTotalNanos.toDouble() / frameIntervalSamples / 1_000_000.0
                 } else {
-                    val targetFps = targetRefreshRate.roundToInt().coerceAtLeast(1)
-                    fpsMeterText.text = getString(R.string.fps_meter_format, fps, targetFps, jankFrameCount)
+                    0.0
+                }
+                val targetFps = targetRefreshRate.roundToInt().coerceAtLeast(1)
+                val averageText = String.format(java.util.Locale.US, "%.1f", averageFrameMs)
+                fpsMeterText.text = "FPS: $fps/$targetFps | Frame: $averageText ms | Drops: $droppedFrameCount"
 
-                    val ratio = fps.toFloat() / targetFps
-                    when {
-                        ratio >= 0.9f -> fpsMeterText.setTextColor(Color.GREEN)
-                        ratio >= 0.5f -> fpsMeterText.setTextColor(Color.YELLOW)
-                        else -> fpsMeterText.setTextColor(Color.RED)
-                    }
+                val ratio = fps.toFloat() / targetFps
+                when {
+                    ratio >= 0.9f && droppedFrameCount <= 1 -> fpsMeterText.setTextColor(Color.GREEN)
+                    ratio >= 0.75f && droppedFrameCount <= 4 -> fpsMeterText.setTextColor(Color.YELLOW)
+                    else -> fpsMeterText.setTextColor(Color.RED)
                 }
 
                 frameCount = 0
-                jankFrameCount = 0
+                droppedFrameCount = 0
+                frameIntervalTotalNanos = 0L
+                frameIntervalSamples = 0
                 fpsWindowStartNanos = frameTimeNanos
                 displayRefreshRate = currentRefreshRate()
             }
@@ -142,7 +149,6 @@ class MainActivity : AppCompatActivity() {
 
         val initPrefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         isFpsMeterEnabled = initPrefs.getBoolean("FPS_METER_ENABLED", true)
-        isVsyncEnabled = initPrefs.getBoolean("VSYNC_ENABLED", false)
         performanceModeEnabled = initPrefs.getBoolean("PERFORMANCE_MODE_ENABLED", true)
         instantTapEnabled = initPrefs.getBoolean("INSTANT_TAP_ENABLED", true)
         applyDisplayPerformance()
@@ -528,7 +534,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun resetFpsWindow() {
         frameCount = 0
-        jankFrameCount = 0
+        droppedFrameCount = 0
+        frameIntervalTotalNanos = 0L
+        frameIntervalSamples = 0
         fpsWindowStartNanos = 0L
         lastFrameTimeNanos = 0L
         displayRefreshRate = currentRefreshRate()
@@ -851,7 +859,7 @@ class MainActivity : AppCompatActivity() {
 
         // --- Performance Mode / Max Refresh Rate Selection ---
         val performanceLabel = android.widget.TextView(this).apply {
-            text = "Performance Mode (Max Refresh Rate)"
+            text = "Maximum Performance (Highest Refresh Rate)"
             textSize = 14f
             setTextColor(android.graphics.Color.GRAY)
             setPadding(0, 32, 0, 8)
@@ -879,7 +887,7 @@ class MainActivity : AppCompatActivity() {
 
         // --- FPS Meter Selection ---
         val fpsLabel = android.widget.TextView(this).apply {
-            text = "Show FPS Meter"
+            text = "Show FPS & Frame Stability"
             textSize = 14f
             setTextColor(android.graphics.Color.GRAY)
             setPadding(0, 32, 0, 8)
@@ -1006,7 +1014,6 @@ class MainActivity : AppCompatActivity() {
                 toolbarSensitivity = selectedSens
                 toolbarPosition = selectedPos ?: "BOTTOM"
                 isFpsMeterEnabled = fpsEnabled
-                isVsyncEnabled = vsyncEnabled
                 performanceModeEnabled = performanceEnabled
                 instantTapEnabled = instantTap
 
