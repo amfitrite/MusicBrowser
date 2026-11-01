@@ -475,7 +475,7 @@
                 if (url) preloadLinkTarget(url);
                 pageObserver.unobserve(link);
             });
-        }, { rootMargin: "250px 0px" });
+        }, { rootMargin: "200% 0px" });
 
         mediaObserver = new IntersectionObserver(entries => {
             entries.forEach(entry => {
@@ -483,7 +483,7 @@
                 warmMediaElement(entry.target, false);
                 mediaObserver.unobserve(entry.target);
             });
-        }, { rootMargin: "400px 0px" });
+        }, { rootMargin: "200% 0px" });
 
         document.addEventListener("pointerover", onPreloadIntent, true);
         document.addEventListener("touchstart", onPreloadIntent, { capture: true, passive: true });
